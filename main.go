@@ -4,11 +4,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/themethaithian/go-db/app"
+	"github.com/themethaithian/go-db/internal/api"
 	"github.com/themethaithian/go-db/internal/db"
 	"github.com/themethaithian/go-db/internal/guard"
 	"github.com/themethaithian/go-db/internal/service"
@@ -39,14 +41,28 @@ func main() {
 	)
 	shell := app.New(svc)
 
+	// The local API is a second, thin adapter over the same facade: a
+	// loopback-only, token-gated pipe the MCP proxy talks to. It shares the
+	// app's config dir for its token file and follows the shell's own
+	// lifecycle — up after Startup, down before Shutdown finishes.
+	apiServer := api.New(svc, configDir)
+
 	err = wails.Run(&options.App{
-		Title:      "go-db",
-		Width:      1024,
-		Height:     768,
-		Assets:     app.Assets(),
-		OnStartup:  shell.Startup,
-		OnShutdown: shell.Shutdown,
-		Bind:       []interface{}{shell},
+		Title:  "go-db",
+		Width:  1024,
+		Height: 768,
+		Assets: app.Assets(),
+		OnStartup: func(ctx context.Context) {
+			shell.Startup(ctx)
+			if err := apiServer.Start(); err != nil {
+				fmt.Fprintln(os.Stderr, "go-db: starting local API:", err)
+			}
+		},
+		OnShutdown: func(ctx context.Context) {
+			apiServer.Close()
+			shell.Shutdown(ctx)
+		},
+		Bind: []interface{}{shell},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "go-db:", err)

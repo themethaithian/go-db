@@ -1,20 +1,17 @@
 <script lang="ts">
-  // Deliberately empty: v1 scaffold only. Design tokens and layout land in
-  // a later issue.
+  // App shell: design tokens + status bar skeleton (issue #4). Connection
+  // state and live RAM reporting land in later issues.
 </script>
 
-<main></main>
+<div class="flex h-screen w-screen flex-col bg-surface font-sans text-base text-text">
+  <main class="flex flex-1 items-center justify-center">
+    <span class="text-lg text-text-muted">go-db</span>
+  </main>
 
-<style>
-  :global(html, body) {
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    background: #0a0a0a;
-  }
-
-  main {
-    width: 100vw;
-    height: 100vh;
-  }
-</style>
+  <footer
+    class="flex h-8 shrink-0 items-center justify-between border-t border-border bg-surface-raised px-3 text-xs text-text-muted"
+  >
+    <span>go-db · not connected</span>
+    <span>— MB</span>
+  </footer>
+</div>

@@ -8,6 +8,7 @@ import (
 	"embed"
 
 	"github.com/themethaithian/go-db/internal/db"
+	"github.com/themethaithian/go-db/internal/guard"
 	"github.com/themethaithian/go-db/internal/service"
 )
 
@@ -85,4 +86,19 @@ func (a *App) Disconnect(name string) error {
 // ConnectedProfiles returns the names of the Profiles currently connected.
 func (a *App) ConnectedProfiles() []string {
 	return a.svc.ConnectedProfiles()
+}
+
+// Classify reports whether sql is provably read-only, without connecting to
+// anything or running it. The editor calls it as the human types, to drive
+// the read/mutation badge.
+func (a *App) Classify(sql string) guard.Classification {
+	return a.svc.Classify(sql)
+}
+
+// RunQuery submits sql on the named Profile from the SQL editor. The editor
+// is the human Origin — an AI query arrives only through the MCP server,
+// which is not wired in yet — so this binding hardcodes guard.OriginHuman
+// rather than accepting it as a parameter.
+func (a *App) RunQuery(profileName, sql string) service.QueryResult {
+	return a.svc.RunQuery(a.ctx, profileName, sql, guard.OriginHuman)
 }

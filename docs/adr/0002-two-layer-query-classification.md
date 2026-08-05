@@ -36,5 +36,6 @@ If the database rejects a write (e.g. mutation function in SELECT, EXPLAIN ANALY
 ## Consequences
 - Most queries are classified statically and execute quickly.
 - A small number of ambiguous queries pay a small overhead (one extra transaction start/rollback).
-- No false positives: every mutation is either gated upfront or caught at the DB layer.
+- DML and locking reads that slip past the classifier are caught at the DB layer (MySQL error 1792) and rerouted into the gate.
+- **The backstop does not cover DDL.** MySQL DDL implicitly commits before the read-only check, so `DROP`/`ALTER`/`TRUNCATE`/`CREATE` succeed inside a `READ ONLY` transaction (verified against MySQL 8; pinned by `TestIntegrationBackstopDoesNotCoverDDL`). For DDL the classifier is the only layer. The residual risk is a parser bug that parses a DDL statement as a read node; unparseable input already fails closed to Mutation.
 - The TiDB parser dependency brings excellent MySQL compatibility and is actively maintained.

@@ -17,6 +17,12 @@ import (
 const (
 	erAccessDenied           = 1045 // wrong user or password
 	erAccessDeniedNoPassword = 1698 // rejected by the authentication plugin
+
+	// erCantExecuteInReadOnlyTransaction is what MySQL answers a statement
+	// that would write inside a READ ONLY transaction. It is the Approval
+	// Gate's backstop speaking, and the one error number this adapter turns
+	// into a domain outcome rather than a message.
+	erCantExecuteInReadOnlyTransaction = 1792
 )
 
 const (
@@ -59,8 +65,13 @@ func (mysqlDriver) Open(ctx context.Context, profile Profile, password string) (
 	cfg.User = profile.User
 	cfg.Passwd = password
 	cfg.DBName = profile.Database
-	cfg.ParseTime = true
 	cfg.Timeout = dialTimeout
+
+	// Dates and times are left as the server wrote them. A read's job here is
+	// to be displayed, and MySQL's own text form is the display form: parsing
+	// a DATE into a time.Time only to choose a layout for it again would make
+	// this adapter guess at a format the server already picked.
+	cfg.ParseTime = false
 
 	// A connector keeps the password in memory as a field; it is never
 	// formatted into a DSN string that could reach a log or an error.
@@ -93,6 +104,95 @@ func (c *mysqlConn) Ping(ctx context.Context) error {
 		return classify(err)
 	}
 	return nil
+}
+
+// ReadQuery runs sql inside a READ ONLY transaction and returns its rows.
+//
+// The transaction is the point of the method, not an implementation detail: it
+// is what lets the app run a statement it only believes is a read. MySQL
+// refuses any write inside one with error 1792, which becomes ErrWriteAttempt
+// so the Approval Gate can take the query back.
+func (c *mysqlConn) ReadQuery(ctx context.Context, sql string) (ResultSet, error) {
+	// A read-only transaction is a property of one session, so the statement
+	// and its transaction must share a connection; BeginTx pins one for us.
+	tx, err := c.pool.BeginTx(ctx, &txReadOnly)
+	if err != nil {
+		return ResultSet{}, readError(err)
+	}
+	// Nothing in here commits: a transaction that only read has nothing to
+	// commit, and rolling back is the one ending that is correct whether the
+	// statement succeeded, failed, or was refused for writing.
+	defer tx.Rollback() //nolint:errcheck // the transaction is read-only; a failed rollback changes nothing
+
+	rows, err := tx.QueryContext(ctx, sql)
+	if err != nil {
+		return ResultSet{}, readError(err)
+	}
+	defer rows.Close()
+
+	result, err := collect(rows)
+	if err != nil {
+		return ResultSet{}, readError(err)
+	}
+	return result, nil
+}
+
+// txReadOnly is the transaction reads run in. Default isolation is deliberate:
+// the read-only promise is what matters here, not a stricter snapshot.
+var txReadOnly = sql.TxOptions{ReadOnly: true}
+
+// collect drains rows into a ResultSet, stopping at MaxRows. It peeks one row
+// past the cap so Truncated means "there was more", not "you asked for exactly
+// the cap".
+func collect(rows *sql.Rows) (ResultSet, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return ResultSet{}, err
+	}
+
+	// RawBytes hands over the driver's own buffer, valid only until the next
+	// Next; every value is copied into a string before that happens.
+	raw := make([]sql.RawBytes, len(columns))
+	scan := make([]any, len(columns))
+	for i := range raw {
+		scan[i] = &raw[i]
+	}
+
+	result := ResultSet{Columns: columns, Rows: [][]*string{}}
+	for rows.Next() {
+		if len(result.Rows) == MaxRows {
+			result.Truncated = true
+			break
+		}
+		if err := rows.Scan(scan...); err != nil {
+			return ResultSet{}, err
+		}
+
+		row := make([]*string, len(columns))
+		for i, value := range raw {
+			if value == nil {
+				continue // SQL NULL, which no string stands in for
+			}
+			text := string(value)
+			row[i] = &text
+		}
+		result.Rows = append(result.Rows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return ResultSet{}, err
+	}
+	return result, nil
+}
+
+// readError classifies a failure from running a read. Only one distinction
+// matters to the caller: the database refusing a write is a reroute to the
+// Approval Gate, and everything else is a failure to report.
+func readError(err error) error {
+	var serverErr *mysql.MySQLError
+	if errors.As(err, &serverErr) && serverErr.Number == erCantExecuteInReadOnlyTransaction {
+		return fmt.Errorf("%w: %s", ErrWriteAttempt, serverErr.Message)
+	}
+	return classify(err)
 }
 
 func (c *mysqlConn) Close() error {

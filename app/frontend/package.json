@@ -18,5 +18,12 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5.6.3",
     "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.10.4",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.8",
+    "codemirror": "^6.0.2"
   }
 }

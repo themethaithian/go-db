@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"github.com/themethaithian/go-db/app"
+	"github.com/themethaithian/go-db/internal/db"
+	"github.com/themethaithian/go-db/internal/service"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 )
@@ -18,9 +20,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	shell := app.New()
+	profileDir, err := db.DefaultProfileDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "go-db:", err)
+		os.Exit(1)
+	}
 
-	err := wails.Run(&options.App{
+	svc := service.New(db.NewProfileStore(profileDir, db.NewOSKeychain()))
+	shell := app.New(svc)
+
+	err = wails.Run(&options.App{
 		Title:     "go-db",
 		Width:     1024,
 		Height:    768,

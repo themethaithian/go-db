@@ -4,8 +4,8 @@
 //
 // The facade is the primary testing seam. Behaviour is specified by tests here,
 // against real domain collaborators wired over temporary directories and fakes
-// for the ports that reach outside the process (Keychain today; the SSH tunnel,
-// Connection Registry, and Approval Gate as they arrive). Tests state external
+// for the ports that reach outside the process (the Keychain, the database
+// Driver, and the SSH tunnel dialler). Tests state external
 // behaviour only, so the machinery behind the seam — file layout, TOML library,
 // internal type names — can change without touching them.
 //

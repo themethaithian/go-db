@@ -9,6 +9,7 @@ require (
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20260805034116-c0e41374901d
 	github.com/wailsapp/wails/v2 v2.13.0
 	github.com/zalando/go-keyring v0.2.8
+	golang.org/x/crypto v0.51.0
 )
 
 require (
@@ -49,7 +50,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect

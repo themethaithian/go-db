@@ -60,7 +60,17 @@
             {/if}
             {profile.Name}
           </span>
-          <span class="text-xs text-text-muted">{subtitle(profile)}</span>
+          <span class="flex items-center gap-1.5 text-xs text-text-muted">
+            {subtitle(profile)}
+            {#if profile.SSH}
+              <span
+                class="rounded-full border border-border bg-surface-overlay px-1.5 py-0 text-xs font-medium tracking-wide text-text-muted uppercase"
+                title="Reached through an SSH tunnel"
+              >
+                ssh
+              </span>
+            {/if}
+          </span>
         </button>
       {/each}
     {/if}

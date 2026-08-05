@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"net"
 )
 
 // ErrAuthFailed reports that the server was reached but rejected the Profile's
@@ -56,8 +57,22 @@ type Driver interface {
 	// profile.User with password, and returns a live connection. A returned
 	// Conn has already been verified to answer; a returned error means no
 	// resources were left open.
-	Open(ctx context.Context, profile Profile, password string) (Conn, error)
+	//
+	// dial is the path to the server. A nil dial means the ordinary one — reach
+	// the address from this machine — and a non-nil one is used instead of it,
+	// which is how a Profile with an SSH tunnel is reached without this port
+	// knowing that SSH exists. Implementations must not fall back to dialling
+	// directly when dial fails: a tunnelled Profile that quietly connects
+	// around its bastion is worse than one that does not connect.
+	Open(ctx context.Context, profile Profile, password string, dial DialFunc) (Conn, error)
 }
+
+// DialFunc opens one connection to address on a Driver's behalf.
+//
+// It is the seam the Connection Registry puts a Tunnel into: the address is
+// whatever the Profile names, resolved wherever the dialler is — here for a
+// direct connection, on the bastion for a tunnelled one.
+type DialFunc func(ctx context.Context, address string) (net.Conn, error)
 
 // Conn is one open connection to a database, held by the Connection Registry.
 //

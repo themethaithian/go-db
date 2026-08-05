@@ -222,7 +222,21 @@ func (d *FakeDriver) Opens() int {
 }
 
 // Open implements db.Driver.
-func (d *FakeDriver) Open(ctx context.Context, profile db.Profile, password string) (db.Conn, error) {
+//
+// A non-nil dial is used before anything else is decided, as a real driver
+// would use it: a Profile whose tunnel cannot reach the database fails to open
+// even though the database itself is scripted to answer.
+func (d *FakeDriver) Open(ctx context.Context, profile db.Profile, password string, dial db.DialFunc) (db.Conn, error) {
+	if dial != nil {
+		conn, err := dial(ctx, profile.Address())
+		if err != nil {
+			return nil, err
+		}
+		// Nothing is sent over it; the dial itself is the evidence that this
+		// connection went the way the Profile said it should.
+		conn.Close()
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 

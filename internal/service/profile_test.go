@@ -81,6 +81,9 @@ func TestProfilesSurviveRestart(t *testing.T) {
 				Host: "bastion.staging.internal",
 				Port: 22,
 				User: "deploy",
+				// The key file is a path, not a key: what survives a save is
+				// where to find the identity, never the identity itself.
+				KeyFile: "/Users/dev/.ssh/id_ed25519_staging",
 			},
 		},
 	}

@@ -20,8 +20,8 @@ type Profile struct {
 	Database string `toml:"database,omitempty"`
 
 	// SSH is the optional tunnel used to reach Host. Nil means a direct
-	// connection. The tunnel is persisted but not yet dialled; the SSH tunnel
-	// port is declared here and implemented in a later slice.
+	// connection; otherwise Host is resolved and dialled on the bastion rather
+	// than here, so it may be a name that means nothing on this machine.
 	SSH *SSHTunnel `toml:"ssh,omitempty"`
 }
 
@@ -38,8 +38,26 @@ func (p Profile) Address() string {
 
 // SSHTunnel describes the jump host a Profile's connection is tunnelled
 // through. Its credentials, like a Profile's, never touch disk.
+//
+// KeyFile is the path to a private key to authenticate with. It is optional,
+// and the empty case is the usual one: the running SSH agent is asked first,
+// then the default keys in ~/.ssh. Only the path is stored — the key stays
+// where ssh keeps it, and a passphrase-protected key is expected to be held by
+// the agent, since v1 asks for no SSH passwords.
 type SSHTunnel struct {
-	Host string `toml:"host"`
-	Port int    `toml:"port"`
-	User string `toml:"user"`
+	Host    string `toml:"host"`
+	Port    int    `toml:"port"`
+	User    string `toml:"user"`
+	KeyFile string `toml:"key_file,omitempty"`
+}
+
+// Address returns the host:port of the bastion, defaulting an unset port to
+// SSH's 22. Like Profile.Address it is how the tunnel names its host wherever
+// one is shown or dialled, so a message and a dial agree.
+func (t SSHTunnel) Address() string {
+	port := t.Port
+	if port == 0 {
+		port = defaultSSHPort
+	}
+	return net.JoinHostPort(t.Host, strconv.Itoa(port))
 }

@@ -24,6 +24,17 @@ func newConnectedFacade(t *testing.T, keychain db.Keychain, driver db.Driver) *s
 	)
 }
 
+// newTunnelledFacade builds an App Service whose Connection Registry reaches
+// bastions through tunnels rather than over SSH.
+func newTunnelledFacade(t *testing.T, driver db.Driver, tunnels db.TunnelDialer) *service.AppService {
+	t.Helper()
+
+	return service.NewWithApproval(
+		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver, tunnels,
+		guard.NewJSONLAuditLog(t.TempDir()), nil, 0, nil,
+	)
+}
+
 // localProfile is the Profile the fake driver's scripted outcomes are keyed by.
 func localProfile(name string) db.Profile {
 	return db.Profile{Name: name, Host: "db.internal", Port: 3306, User: "root", Database: "app"}
@@ -100,6 +111,103 @@ func TestTestConnectionOutcomes(t *testing.T) {
 			}
 			if strings.Contains(got.Message, "s3cret") {
 				t.Errorf("message leaks the password: %q", got.Message)
+			}
+		})
+	}
+}
+
+// tunnelledProfile is localProfile reached through a bastion. The database host
+// is one only the bastion can resolve, which is the ordinary shape of a
+// tunnelled Profile and the reason the two hosts must never be confused in a
+// message.
+func tunnelledProfile(name string) db.Profile {
+	profile := localProfile(name)
+	profile.SSH = &db.SSHTunnel{Host: "bastion.example", Port: 2222, User: "jump"}
+	return profile
+}
+
+func TestTestConnectionThroughATunnelOutcomes(t *testing.T) {
+	cases := []struct {
+		name string
+		// script prepares the fake bastion and the fake database.
+		script      func(tunnels *dbtest.FakeTunnels, driver *dbtest.FakeDriver)
+		wantStatus  service.ConnectionStatus
+		wantMessage []string // substrings the message must contain
+		denyMessage []string // substrings the message must not contain
+	}{
+		{
+			name: "a tunnelled connection succeeds",
+			script: func(tunnels *dbtest.FakeTunnels, driver *dbtest.FakeDriver) {
+				driver.Accept("remote", "s3cret")
+			},
+			wantStatus:  service.ConnectionOK,
+			wantMessage: []string{"db.internal:3306", "root"},
+		},
+		{
+			name: "an unreachable bastion names the bastion, not the database",
+			script: func(tunnels *dbtest.FakeTunnels, driver *dbtest.FakeDriver) {
+				tunnels.FailOpen("bastion.example:2222", db.ErrBastionUnreachable)
+			},
+			wantStatus:  service.ConnectionUnreachable,
+			wantMessage: []string{"bastion.example:2222"},
+			// Blaming the database for a jump host that is off would send the
+			// human to check the wrong machine.
+			denyMessage: []string{"db.internal:3306"},
+		},
+		{
+			name: "a refused SSH key is not a refused password",
+			script: func(tunnels *dbtest.FakeTunnels, driver *dbtest.FakeDriver) {
+				tunnels.FailOpen("bastion.example:2222", db.ErrSSHAuthFailed)
+			},
+			wantStatus:  service.ConnectionSSHAuthFailed,
+			wantMessage: []string{"bastion.example:2222", "jump"},
+		},
+		{
+			name: "an untrusted host key says how to trust it",
+			script: func(tunnels *dbtest.FakeTunnels, driver *dbtest.FakeDriver) {
+				tunnels.FailOpen("bastion.example:2222", db.ErrSSHHostKey)
+			},
+			wantStatus:  service.ConnectionUnreachable,
+			wantMessage: []string{"bastion.example:2222", "known_hosts"},
+		},
+		{
+			name: "a database the bastion cannot reach names both",
+			script: func(tunnels *dbtest.FakeTunnels, driver *dbtest.FakeDriver) {
+				driver.Accept("remote", "s3cret")
+				tunnels.FailDial("db.internal:3306", db.ErrUnreachable)
+			},
+			wantStatus:  service.ConnectionUnreachable,
+			wantMessage: []string{"db.internal:3306", "bastion.example:2222"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			driver, tunnels := dbtest.NewFakeDriver(), dbtest.NewFakeTunnels()
+			tc.script(tunnels, driver)
+			svc := newTunnelledFacade(t, driver, tunnels)
+			mustSave(t, svc, tunnelledProfile("remote"), "s3cret")
+
+			got := svc.TestConnection(context.Background(), "remote")
+
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q (message: %s)", got.Status, tc.wantStatus, got.Message)
+			}
+			if strings.Contains(got.Message, "\n") {
+				t.Errorf("outcome message spans lines, want one readable line:\n%s", got.Message)
+			}
+			for _, want := range tc.wantMessage {
+				if !strings.Contains(got.Message, want) {
+					t.Errorf("message %q does not mention %q", got.Message, want)
+				}
+			}
+			for _, deny := range tc.denyMessage {
+				if strings.Contains(got.Message, deny) {
+					t.Errorf("message %q mentions %q, which is not what failed", got.Message, deny)
+				}
+			}
+			if tunnels.OpenTunnels() != 0 {
+				t.Errorf("a connection test left %d tunnels open, want none", tunnels.OpenTunnels())
 			}
 		})
 	}

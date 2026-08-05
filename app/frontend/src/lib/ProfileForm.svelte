@@ -43,6 +43,16 @@
   let password = $state("");
   let confirmingDelete = $state(false);
 
+  // SSH tunnel section. sshPortInput is kept as a plain string (not a bound
+  // number) so an emptied field reads back as "" rather than NaN; it is
+  // parsed on submit, with empty treated as 0 so the backend's own default
+  // to port 22 applies (SSHTunnel.Address).
+  let sshEnabled = $state(false);
+  let sshHost = $state("");
+  let sshPortInput = $state("");
+  let sshUser = $state("");
+  let sshKeyFile = $state("");
+
   $effect(() => {
     name = profile?.Name ?? "";
     host = profile?.Host ?? "";
@@ -51,19 +61,37 @@
     database = profile?.Database ?? "";
     password = "";
     confirmingDelete = false;
+
+    sshEnabled = profile?.SSH != null;
+    sshHost = profile?.SSH?.Host ?? "";
+    sshPortInput = profile?.SSH?.Port ? String(profile.SSH.Port) : "";
+    sshUser = profile?.SSH?.User ?? "";
+    sshKeyFile = profile?.SSH?.KeyFile ?? "";
   });
+
+  function parsedSshPort(): number {
+    const trimmed = sshPortInput.trim();
+    if (trimmed === "") return 0;
+    const n = parseInt(trimmed, 10);
+    return Number.isFinite(n) ? n : 0;
+  }
 
   function handleSubmit(event: SubmitEvent) {
     event.preventDefault();
-    // Preserve any existing SSH tunnel config on edit — the form has no SSH
-    // fields yet (issue #12), and omitting it here would wipe it on save.
     const submitted = new db.Profile({
       Name: name,
       Host: host,
       Port: port,
       User: user,
       Database: database,
-      SSH: profile?.SSH,
+      SSH: sshEnabled
+        ? new db.SSHTunnel({
+            Host: sshHost,
+            Port: parsedSshPort(),
+            User: sshUser,
+            KeyFile: sshKeyFile,
+          })
+        : undefined,
     });
     onSave(submitted, password);
   }
@@ -139,6 +167,63 @@
       placeholder={isEditing ? "leave blank to keep current" : "optional"}
     />
   </label>
+
+  <div class="flex flex-col gap-3 rounded-control border border-border bg-surface-raised p-3">
+    <label class="flex items-center gap-2 text-sm text-text">
+      <input
+        type="checkbox"
+        class="h-4 w-4 rounded-sm border-border bg-surface accent-accent"
+        bind:checked={sshEnabled}
+      />
+      Connect through an SSH tunnel
+    </label>
+
+    {#if sshEnabled}
+      <div class="flex flex-col gap-3 border-l border-border pl-4">
+        <label class="flex flex-col gap-1 text-sm text-text-muted">
+          Bastion host
+          <input
+            class="rounded-control border border-border bg-surface px-3 py-2 text-text"
+            bind:value={sshHost}
+            required
+          />
+        </label>
+
+        <label class="flex flex-col gap-1 text-sm text-text-muted">
+          Port
+          <input
+            type="number"
+            class="rounded-control border border-border bg-surface px-3 py-2 text-text"
+            value={sshPortInput}
+            oninput={(e) => (sshPortInput = e.currentTarget.value)}
+            placeholder="22"
+          />
+        </label>
+
+        <label class="flex flex-col gap-1 text-sm text-text-muted">
+          User
+          <input
+            class="rounded-control border border-border bg-surface px-3 py-2 text-text"
+            bind:value={sshUser}
+            required
+          />
+        </label>
+
+        <label class="flex flex-col gap-1 text-sm text-text-muted">
+          Key file
+          <input
+            class="rounded-control border border-border bg-surface px-3 py-2 text-text"
+            bind:value={sshKeyFile}
+            placeholder="optional"
+          />
+          <span class="text-xs text-text-muted">
+            Optional — leave empty to use your SSH agent or default keys (~/.ssh). Passphrase-protected keys must be
+            held by the agent.
+          </span>
+        </label>
+      </div>
+    {/if}
+  </div>
 
   <div class="flex flex-wrap items-center gap-3 pt-2">
     <button

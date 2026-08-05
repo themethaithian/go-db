@@ -54,11 +54,12 @@ type mysqlDriver struct{}
 
 // Open dials profile's server and verifies the connection answers before
 // returning it. Nothing is left open on failure.
-func (mysqlDriver) Open(ctx context.Context, profile Profile, password string) (Conn, error) {
-	if profile.SSH != nil {
-		return nil, fmt.Errorf("db: profile %q connects through an SSH tunnel, which is not supported yet", profile.Name)
-	}
-
+//
+// A non-nil dial replaces the driver's own dialling, so every connection in the
+// pool — including ones opened later, as the pool grows — goes the same way.
+// This adapter never learns why: a tunnelled Profile and a direct one differ
+// here by one function value.
+func (mysqlDriver) Open(ctx context.Context, profile Profile, password string, dial DialFunc) (Conn, error) {
 	cfg := mysql.NewConfig()
 	cfg.Net = "tcp"
 	cfg.Addr = profile.Address()
@@ -66,6 +67,15 @@ func (mysqlDriver) Open(ctx context.Context, profile Profile, password string) (
 	cfg.Passwd = password
 	cfg.DBName = profile.Database
 	cfg.Timeout = dialTimeout
+
+	if dial != nil {
+		// The driver's per-connection dialler, rather than a globally
+		// registered network name: a registration keyed by name is process-wide
+		// state two Profiles would have to agree about, and this is not.
+		cfg.DialFunc = func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return dial(ctx, addr)
+		}
+	}
 
 	// Dates and times are left as the server wrote them. A read's job here is
 	// to be displayed, and MySQL's own text form is the display form: parsing
@@ -227,6 +237,13 @@ func (c *mysqlConn) Close() error {
 // the server was never reached. Anything else keeps its own message — the
 // server's wording is usually the most useful thing we could say.
 func classify(err error) error {
+	// A failure raised by the tunnel on the way out is already classified, and
+	// names the hop that failed — which this adapter could not do, since it
+	// does not know there is one. Its wording is the honest one; keep it.
+	if errors.Is(err, ErrSSHAuthFailed) || errors.Is(err, ErrSSHHostKey) || errors.Is(err, ErrUnreachable) {
+		return err
+	}
+
 	var serverErr *mysql.MySQLError
 	if errors.As(err, &serverErr) {
 		switch serverErr.Number {

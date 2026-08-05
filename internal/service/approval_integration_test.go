@@ -40,6 +40,7 @@ func approving(t *testing.T, host string, port int, timeout time.Duration) (*ser
 	svc := service.NewWithApproval(
 		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()),
 		db.NewMySQLDriver(),
+		nil,
 		guard.NewJSONLAuditLog(auditDir),
 		nil,
 		timeout,

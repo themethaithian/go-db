@@ -65,7 +65,7 @@ func newTestServerWithApproval(t *testing.T, approvalTimeout time.Duration) *tes
 
 	driver := dbtest.NewFakeDriver()
 	svc := service.NewWithApproval(
-		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver,
+		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver, nil,
 		guard.NewJSONLAuditLog(t.TempDir()), nil, approvalTimeout, nil,
 	)
 

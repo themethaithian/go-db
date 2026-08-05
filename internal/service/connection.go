@@ -20,8 +20,15 @@ const (
 	// the Profile's user or password.
 	ConnectionAuthFailed ConnectionStatus = "auth_failed"
 	// ConnectionUnreachable reports that the server was never reached: the
-	// host does not resolve, nothing is listening, or the dial timed out.
+	// host does not resolve, nothing is listening, or the dial timed out. A
+	// Profile with a tunnel lands here too when its bastion is down or its
+	// database is not reachable from the bastion — nothing answered, and the
+	// Message says which hop.
 	ConnectionUnreachable ConnectionStatus = "unreachable"
+	// ConnectionSSHAuthFailed reports that the Profile's SSH bastion refused
+	// our credentials. It is its own status rather than an authentication
+	// failure because the thing to fix is an SSH key, not a database password.
+	ConnectionSSHAuthFailed ConnectionStatus = "ssh_auth_failed"
 	// ConnectionUnknownProfile reports that no Profile is saved under the
 	// requested name.
 	ConnectionUnknownProfile ConnectionStatus = "unknown_profile"
@@ -55,6 +62,13 @@ func (s *AppService) TestConnection(ctx context.Context, profileName string) Con
 
 	if err := s.registry.Test(ctx, profileName); err != nil {
 		return failedOutcome(profile, err)
+	}
+	if profile.SSH != nil {
+		return ConnectionTest{
+			Status: ConnectionOK,
+			Message: fmt.Sprintf("Connected to %s as %s through the SSH bastion %s.",
+				profile.Address(), profile.User, profile.SSH.Address()),
+		}
 	}
 	return ConnectionTest{
 		Status:  ConnectionOK,
@@ -104,9 +118,14 @@ func unknownProfile(profileName string) ConnectionTest {
 }
 
 // failedOutcome turns a classified connect error into prose. The distinction
-// that matters is the first two cases: a wrong password and an unreachable
-// host look identical in a raw driver error, and call for entirely different
-// fixes.
+// that matters is who refused and what the human has to change: a wrong
+// password and an unreachable host look identical in a raw driver error, and a
+// Profile with a tunnel doubles every question — which of its two hosts is the
+// one to go and look at.
+//
+// The tunnel cases are ordered before the plain ones because they are narrower:
+// a bastion that was never reached is an unreachable database too, and saying
+// so about the database would send the human to the wrong machine.
 func failedOutcome(profile db.Profile, err error) ConnectionTest {
 	switch {
 	case errors.Is(err, db.ErrProfileNotFound):
@@ -119,6 +138,34 @@ func failedOutcome(profile db.Profile, err error) ConnectionTest {
 				profile.Address(), profile.User),
 		}
 
+	case errors.Is(err, db.ErrSSHAuthFailed):
+		return ConnectionTest{
+			Status: ConnectionSSHAuthFailed,
+			Message: fmt.Sprintf("The SSH bastion %s refused the key for %s: add the key to your SSH agent, or set the Profile's key file.",
+				bastion(profile), bastionUser(profile)),
+		}
+
+	case errors.Is(err, db.ErrSSHHostKey):
+		return ConnectionTest{
+			Status: ConnectionUnreachable,
+			Message: fmt.Sprintf("The SSH bastion %s presented a host key that is not in known_hosts: connect to it once with ssh, and check why its key changed if it has.",
+				bastion(profile)),
+		}
+
+	case errors.Is(err, db.ErrBastionUnreachable):
+		return ConnectionTest{
+			Status: ConnectionUnreachable,
+			Message: fmt.Sprintf("Could not reach the SSH bastion %s: check the bastion host, port, and network.",
+				bastion(profile)),
+		}
+
+	case errors.Is(err, db.ErrUnreachable) && profile.SSH != nil:
+		return ConnectionTest{
+			Status: ConnectionUnreachable,
+			Message: fmt.Sprintf("Could not reach %s from the SSH bastion %s: check the host and port as the bastion sees them.",
+				profile.Address(), bastion(profile)),
+		}
+
 	case errors.Is(err, db.ErrUnreachable):
 		return ConnectionTest{
 			Status: ConnectionUnreachable,
@@ -128,6 +175,22 @@ func failedOutcome(profile db.Profile, err error) ConnectionTest {
 	}
 
 	return ConnectionTest{Status: ConnectionFailed, Message: oneLine(err)}
+}
+
+// bastion names the Profile's jump host for a message. A tunnel error on a
+// Profile with no tunnel cannot happen, but a message is a bad place to panic.
+func bastion(profile db.Profile) string {
+	if profile.SSH == nil {
+		return "the SSH bastion"
+	}
+	return profile.SSH.Address()
+}
+
+func bastionUser(profile db.Profile) string {
+	if profile.SSH == nil {
+		return "its user"
+	}
+	return profile.SSH.User
 }
 
 // oneLine renders an unclassified error as a single line of prose. The

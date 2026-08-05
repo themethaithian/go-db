@@ -23,18 +23,36 @@ var ErrNotConnected = errors.New("db: profile is not connected")
 //
 // It is safe for concurrent use. Dialling happens outside the lock, so a slow
 // connect to one Profile never blocks another.
+//
+// It also owns the tunnels: a Profile with an SSH tunnel gets one opened before
+// its connection and closed after it, and nothing outside this file can hold
+// one. A tunnel that outlived its connection would be an SSH session nobody is
+// using and nobody can see.
 type Registry struct {
 	driver   Driver
+	tunnels  TunnelDialer
 	profiles *ProfileStore
 
 	mu    sync.Mutex
 	conns map[string]Conn
 }
 
-// NewRegistry returns an empty Registry that opens connections for the
-// Profiles in profiles through driver.
+// NewRegistry returns an empty Registry that opens connections for the Profiles
+// in profiles through driver, tunnelling the ones that ask for it over SSH.
 func NewRegistry(driver Driver, profiles *ProfileStore) *Registry {
-	return &Registry{driver: driver, profiles: profiles, conns: make(map[string]Conn)}
+	return NewRegistryWithTunnels(driver, nil, profiles)
+}
+
+// NewRegistryWithTunnels is NewRegistry with the tunnel dialler chosen: the
+// seam a test uses to substitute a fake bastion, and the way an integration
+// test points the real one at a known_hosts file of its own. A nil tunnels
+// means the real SSH dialler verifying against ~/.ssh/known_hosts, which is
+// what the shipping binary gets.
+func NewRegistryWithTunnels(driver Driver, tunnels TunnelDialer, profiles *ProfileStore) *Registry {
+	if tunnels == nil {
+		tunnels = NewSSHTunnels("")
+	}
+	return &Registry{driver: driver, tunnels: tunnels, profiles: profiles, conns: make(map[string]Conn)}
 }
 
 // Connect opens a connection for the named Profile and holds it.
@@ -59,7 +77,7 @@ func (r *Registry) Connect(ctx context.Context, profileName string) error {
 		return err
 	}
 
-	conn, err := r.driver.Open(ctx, profile, password)
+	conn, err := r.open(ctx, profile, password)
 	if err != nil {
 		return err
 	}
@@ -150,11 +168,37 @@ func (r *Registry) Test(ctx context.Context, profileName string) error {
 		return err
 	}
 
-	conn, err := r.driver.Open(ctx, profile, password)
+	conn, err := r.open(ctx, profile, password)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
 	return conn.Ping(ctx)
+}
+
+// open dials one connection for profile, through a tunnel when the Profile asks
+// for one. The returned Conn owns whatever it needs to be closed with: closing
+// it closes the tunnel too, so no caller has to remember there was one.
+//
+// A Profile with a tunnel fails as one thing. If the bastion refuses us the
+// database is never dialled, and if the database refuses us the tunnel is torn
+// down before the error is returned — an SSH session left behind by a failed
+// connect is a leak no later call could find.
+func (r *Registry) open(ctx context.Context, profile Profile, password string) (Conn, error) {
+	if profile.SSH == nil {
+		return r.driver.Open(ctx, profile, password, nil)
+	}
+
+	tunnel, err := r.tunnels.Open(ctx, *profile.SSH)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := r.driver.Open(ctx, profile, password, tunnel.Dial)
+	if err != nil {
+		tunnel.Close() //nolint:errcheck // the connect already failed; the caller's error is the one worth reporting
+		return nil, err
+	}
+	return tunnelledConn{Conn: conn, tunnel: tunnel}, nil
 }

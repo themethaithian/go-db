@@ -171,7 +171,7 @@ func TestIntegrationReadOnlyTransactionRejectsAWrite(t *testing.T) {
 
 	conn, err := db.NewMySQLDriver().Open(ctx, db.Profile{
 		Name: "direct", Host: host, Port: port, User: mysqlRootUser, Database: mysqlDatabase,
-	}, mysqlRootPassword)
+	}, mysqlRootPassword, nil)
 	if err != nil {
 		t.Fatalf("opening a connection: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestIntegrationBackstopDoesNotCoverDDL(t *testing.T) {
 
 	conn, err := db.NewMySQLDriver().Open(ctx, db.Profile{
 		Name: "direct", Host: host, Port: port, User: mysqlRootUser, Database: mysqlDatabase,
-	}, mysqlRootPassword)
+	}, mysqlRootPassword, nil)
 	if err != nil {
 		t.Fatalf("opening a connection: %v", err)
 	}

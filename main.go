@@ -1,6 +1,6 @@
 // Command go-db is the single binary for the go-db desktop app. By default
-// it launches the Wails desktop shell; `go-db mcp` instead runs the MCP
-// stdio proxy (not yet implemented).
+// it launches the Wails desktop shell; `go-db mcp <profile-name>` instead
+// runs a stdio MCP proxy pinned to that Profile.
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"github.com/themethaithian/go-db/internal/api"
 	"github.com/themethaithian/go-db/internal/db"
 	"github.com/themethaithian/go-db/internal/guard"
+	"github.com/themethaithian/go-db/internal/mcp"
 	"github.com/themethaithian/go-db/internal/service"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -20,8 +21,8 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
-		fmt.Fprintln(os.Stderr, "go-db mcp: proxy not yet implemented")
-		os.Exit(1)
+		runMCP(os.Args[2:])
+		return
 	}
 
 	// One directory holds everything go-db keeps on disk: the Profiles and the
@@ -66,6 +67,21 @@ func main() {
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "go-db:", err)
+		os.Exit(1)
+	}
+}
+
+// runMCP handles the `go-db mcp <profile-name>` subcommand: a required
+// positional Profile argument, and nothing else. args is os.Args with "mcp"
+// itself already stripped.
+func runMCP(args []string) {
+	if len(args) < 1 || args[0] == "" {
+		fmt.Fprintln(os.Stderr, "usage: go-db mcp <profile-name>")
+		os.Exit(2)
+	}
+
+	if err := mcp.Run(args[0]); err != nil {
+		fmt.Fprintln(os.Stderr, "go-db mcp:", err)
 		os.Exit(1)
 	}
 }

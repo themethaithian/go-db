@@ -39,6 +39,12 @@ func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
+// Shutdown is called by Wails as the app closes. It closes every connection
+// the Connection Registry holds so nothing is left dangling.
+func (a *App) Shutdown(ctx context.Context) {
+	a.svc.Close()
+}
+
 // ListProfiles returns every saved Profile, ordered by name. The connection
 // manager UI uses this both to render the Profile list and to populate the
 // edit form, so no separate GetProfile binding is exposed.
@@ -57,4 +63,26 @@ func (a *App) SaveProfile(profile db.Profile, password string) error {
 // keychain secret.
 func (a *App) DeleteProfile(name string) error {
 	return a.svc.DeleteProfile(name)
+}
+
+// TestConnection opens a throwaway connection for the named Profile and
+// reports what happened, without touching the Connection Registry.
+func (a *App) TestConnection(name string) service.ConnectionTest {
+	return a.svc.TestConnection(a.ctx, name)
+}
+
+// Connect opens a connection for the named Profile and holds it in the
+// Connection Registry.
+func (a *App) Connect(name string) error {
+	return a.svc.Connect(a.ctx, name)
+}
+
+// Disconnect closes the connection held for the named Profile.
+func (a *App) Disconnect(name string) error {
+	return a.svc.Disconnect(name)
+}
+
+// ConnectedProfiles returns the names of the Profiles currently connected.
+func (a *App) ConnectedProfiles() []string {
+	return a.svc.ConnectedProfiles()
 }

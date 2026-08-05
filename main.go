@@ -26,16 +26,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	svc := service.New(db.NewProfileStore(profileDir, db.NewOSKeychain()))
+	svc := service.NewWithDriver(db.NewProfileStore(profileDir, db.NewOSKeychain()), db.NewMySQLDriver())
 	shell := app.New(svc)
 
 	err = wails.Run(&options.App{
-		Title:     "go-db",
-		Width:     1024,
-		Height:    768,
-		Assets:    app.Assets(),
-		OnStartup: shell.Startup,
-		Bind:      []interface{}{shell},
+		Title:      "go-db",
+		Width:      1024,
+		Height:     768,
+		Assets:     app.Assets(),
+		OnStartup:  shell.Startup,
+		OnShutdown: shell.Shutdown,
+		Bind:       []interface{}{shell},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "go-db:", err)

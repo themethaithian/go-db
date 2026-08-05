@@ -1,20 +1,36 @@
 <script lang="ts">
   import { db } from "../../wailsjs/go/models";
+  import type { ConnectionOutcome } from "./connection";
 
   // Create/edit form for a single Profile. `profile` is null when creating;
   // Name is immutable once set, since it is the Profile's key. The password
   // field is always blank on entry — a stored password is never echoed back
   // — and is sent to the backend only when the user types a new one.
+  //
+  // Connection state (isConnected, testing, outcome) is owned by App.svelte —
+  // this component only renders it and reports user intent through callbacks.
   let {
     profile,
     error,
+    isConnected,
+    testing,
+    outcome,
     onSave,
     onDelete,
+    onTest,
+    onConnect,
+    onDisconnect,
   }: {
     profile: db.Profile | null;
     error: string | null;
+    isConnected: boolean;
+    testing: boolean;
+    outcome: ConnectionOutcome | null;
     onSave: (profile: db.Profile, password: string) => void;
     onDelete: (name: string) => void;
+    onTest: () => void;
+    onConnect: () => void;
+    onDisconnect: () => void;
   } = $props();
 
   let isEditing = $derived(profile !== null);
@@ -124,14 +140,34 @@
     />
   </label>
 
-  <div class="flex items-center gap-3 pt-2">
+  <div class="flex flex-wrap items-center gap-3 pt-2">
     <button
       type="submit"
       class="rounded-control bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90"
     >
       Save
     </button>
+
     {#if isEditing}
+      <button
+        type="button"
+        class="rounded-control border border-border px-4 py-2 text-sm font-medium text-text transition-colors hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-50"
+        onclick={onTest}
+        disabled={testing}
+      >
+        {testing ? "Testing…" : "Test connection"}
+      </button>
+
+      <button
+        type="button"
+        class="rounded-control border px-4 py-2 text-sm font-medium transition-colors {isConnected
+          ? 'border-border text-text hover:bg-surface-overlay'
+          : 'border-accent text-accent hover:bg-accent/10'}"
+        onclick={isConnected ? onDisconnect : onConnect}
+      >
+        {isConnected ? "Disconnect" : "Connect"}
+      </button>
+
       <button
         type="button"
         class="rounded-control border border-danger px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger/10"
@@ -139,6 +175,18 @@
       >
         {confirmingDelete ? "Really delete?" : "Delete"}
       </button>
+    {:else}
+      <span class="text-xs text-text-muted">Save first to test</span>
     {/if}
   </div>
+
+  {#if outcome}
+    <p
+      class="rounded-control border px-3 py-2 text-sm {outcome.kind === 'success'
+        ? 'border-success/40 bg-success/10 text-success'
+        : 'border-danger/40 bg-danger/10 text-danger'}"
+    >
+      {outcome.message}
+    </p>
+  {/if}
 </form>

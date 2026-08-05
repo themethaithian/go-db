@@ -1,5 +1,10 @@
 package db
 
+import (
+	"net"
+	"strconv"
+)
+
 // Profile is a saved, named description of how to reach one database.
 // Profiles are the only way any Origin names a database: the MCP server pins
 // one explicitly, the editor selects one.
@@ -18,6 +23,17 @@ type Profile struct {
 	// connection. The tunnel is persisted but not yet dialled; the SSH tunnel
 	// port is declared here and implemented in a later slice.
 	SSH *SSHTunnel `toml:"ssh,omitempty"`
+}
+
+// Address returns the host:port this Profile is reached at, defaulting an
+// unset port to MySQL's 3306. It is how the Profile names its server anywhere
+// one is shown or dialled, so both agree.
+func (p Profile) Address() string {
+	port := p.Port
+	if port == 0 {
+		port = defaultMySQLPort
+	}
+	return net.JoinHostPort(p.Host, strconv.Itoa(port))
 }
 
 // SSHTunnel describes the jump host a Profile's connection is tunnelled

@@ -135,6 +135,29 @@ func (s *ProfileStore) Get(name string) (Profile, error) {
 	return Profile{}, fmt.Errorf("%w: %q", ErrProfileNotFound, name)
 }
 
+// Credentials returns the Profile saved under name together with the secret
+// the Keychain holds for it, or ErrProfileNotFound.
+//
+// It exists so the Connection Registry can resolve a Profile name into
+// everything needed to dial without a password passing through a caller that
+// has no business seeing one. A Profile with no stored secret yields an empty
+// password rather than an error: a passwordless database is legitimate.
+func (s *ProfileStore) Credentials(name string) (Profile, string, error) {
+	profile, err := s.Get(name)
+	if err != nil {
+		return Profile{}, "", err
+	}
+
+	secret, err := s.keychain.Get(name)
+	if errors.Is(err, ErrSecretNotFound) {
+		return profile, "", nil
+	}
+	if err != nil {
+		return Profile{}, "", fmt.Errorf("db: reading secret for profile %q: %w", name, err)
+	}
+	return profile, secret, nil
+}
+
 // List returns every saved Profile, ordered by name.
 func (s *ProfileStore) List() ([]Profile, error) {
 	s.mu.Lock()

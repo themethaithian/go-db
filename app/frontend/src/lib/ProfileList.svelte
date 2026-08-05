@@ -2,19 +2,25 @@
   import type { db } from "../../wailsjs/go/models";
 
   // Sidebar: lists saved Profiles and lets the user pick one to edit or
-  // start a new one. Holds no state of its own — App.svelte owns the list
-  // and the current selection.
+  // start a new one. Holds no state of its own — App.svelte owns the list,
+  // the current selection, and which Profiles are connected.
   let {
     profiles,
     selectedName,
+    connectedProfiles,
     onSelect,
     onCreate,
   }: {
     profiles: db.Profile[];
     selectedName: string | null;
+    connectedProfiles: string[];
     onSelect: (name: string) => void;
     onCreate: () => void;
   } = $props();
+
+  function isConnected(profile: db.Profile): boolean {
+    return connectedProfiles.includes(profile.Name);
+  }
 
   function subtitle(profile: db.Profile): string {
     const location = `${profile.Host}:${profile.Port}`;
@@ -48,7 +54,12 @@
             : 'border-transparent hover:bg-surface-overlay/50'}"
           onclick={() => onSelect(profile.Name)}
         >
-          <span class="text-sm text-text">{profile.Name}</span>
+          <span class="flex items-center gap-1.5 text-sm text-text">
+            {#if isConnected(profile)}
+              <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-label="Connected"></span>
+            {/if}
+            {profile.Name}
+          </span>
           <span class="text-xs text-text-muted">{subtitle(profile)}</span>
         </button>
       {/each}

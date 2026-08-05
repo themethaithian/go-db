@@ -3,12 +3,14 @@ module github.com/themethaithian/go-db
 go 1.26.5
 
 require (
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/wailsapp/wails/v2 v2.13.0
 	github.com/zalando/go-keyring v0.2.8
 )
 
 require (
+	filippo.io/edwards25519 v1.2.0 // indirect
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/danieljoos/wincred v1.2.3 // indirect

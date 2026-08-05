@@ -24,15 +24,20 @@ const (
 	// Preview says what it would do; ConfirmPending runs it, CancelPending
 	// discards it.
 	QueryRequiresConfirmation QueryStatus = "requires_confirmation"
-	// QueryRequiresApproval reports that an AI-originated query did not run
-	// because it is not provably read-only. It waits in the Approval Console,
-	// which is a later slice; until then it is simply withheld.
-	QueryRequiresApproval QueryStatus = "requires_approval"
-	// QueryExecuted reports that a confirmed mutation ran. AffectedRows is
-	// what the database really changed.
+	// QueryExecuted reports that a confirmed or approved mutation ran.
+	// AffectedRows is what the database really changed.
 	QueryExecuted QueryStatus = "executed"
-	// QueryCancelled reports that a withheld mutation was discarded unrun.
+	// QueryCancelled reports that a withheld mutation was discarded unrun:
+	// the human cancelled their own Inline Confirm, or the caller that
+	// submitted an AI query withdrew it before anyone answered.
 	QueryCancelled QueryStatus = "cancelled"
+	// QueryRejected reports that a human refused an AI-originated mutation in
+	// the Approval Console. Nothing was executed.
+	QueryRejected QueryStatus = "rejected"
+	// QueryTimedOut reports that nobody answered an AI-originated mutation
+	// before its deadline, so the Approval Console rejected it. Nothing was
+	// executed.
+	QueryTimedOut QueryStatus = "timed_out"
 	// QueryUnknownPending reports that no mutation is waiting under the given
 	// ID — it was already confirmed, already cancelled, or never existed.
 	QueryUnknownPending QueryStatus = "unknown_pending"
@@ -97,20 +102,24 @@ func (s *AppService) Classify(sql string) guard.Classification {
 // RunQuery submits one query on the named Profile, on behalf of origin.
 //
 // Every query passes the Approval Gate's classifier first. Anything not
-// provably read-only does not execute at all and comes back
-// QueryRequiresApproval with the reason. A read executes inside a
-// database-enforced read-only transaction, so a statement the classifier
-// misjudged is caught a second time: if the database refuses it for writing,
-// the query is reclassified and rerouted to the gate on the same footing as a
-// mutation the classifier had caught. See db.Conn.ReadQuery for what that
-// second layer does and does not cover.
+// provably read-only is withheld and takes its Origin's route. A read executes
+// inside a database-enforced read-only transaction, so a statement the
+// classifier misjudged is caught a second time: if the database refuses it for
+// writing, the query is reclassified and rerouted to the gate on the same
+// footing as a mutation the classifier had caught. See db.Conn.ReadQuery for
+// what that second layer does and does not cover.
 //
 // It returns no error: every outcome, including failure, is a result the UI
 // renders directly.
 //
 // origin is recorded and returned with the result, and decides the policy the
-// gate applies: a human's mutation raises an Inline Confirm here and now, an
-// AI's waits in the Approval Console.
+// gate applies. A human's mutation raises an Inline Confirm and returns at
+// once, to be answered by a second call. An AI's waits in the Approval Console,
+// and this call blocks with it: it returns when a human approves it — having
+// run it — rejects it, or its deadline passes. That is the whole point of the
+// design. An agent cannot be trusted to come back for a result it was told to
+// poll for, so the pause lives in the call it already made, and ctx is how the
+// caller withdraws: an MCP client that dies takes its pending mutation with it.
 func (s *AppService) RunQuery(ctx context.Context, profileName, sql string, origin guard.Origin) QueryResult {
 	classification := guard.Classify(sql)
 	result := QueryResult{Classification: classification, Origin: origin}
@@ -149,37 +158,35 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, sql string, orig
 // withhold applies the Origin's policy to a mutation. It is one function so a
 // mutation caught by the classifier and one caught by the database take exactly
 // the same route — which is the point of the backstop.
+//
+// Both policies need a connection twice over — to compute the Impact Preview
+// now and to run the statement once it is decided — so a Profile that is not
+// connected is reported rather than queued against nothing. Both get the same
+// preview, computed the same way: what the human is deciding on does not depend
+// on who asked.
 func (s *AppService) withhold(ctx context.Context, profileName, sql string, result QueryResult) QueryResult {
-	if result.Origin != guard.OriginHuman {
-		// The Approval Console is a later slice. Until it exists, an
-		// AI-originated mutation is withheld and nothing else happens on its
-		// behalf: no preview, no queue entry, nothing to confirm.
-		result.Status = QueryRequiresApproval
-		result.Message = fmt.Sprintf("This query was not run: %s. It needs approval first.", result.Classification.Reason)
-		return result
-	}
-
-	// Inline Confirm needs a connection twice over — to compute the preview
-	// now and to run the statement on confirmation — so a Profile that is not
-	// connected is reported rather than queued against nothing.
 	conn, err := s.registry.Conn(profileName)
 	if err != nil {
 		return notConnected(result, profileName)
 	}
 
-	preview := s.previewImpact(ctx, conn, sql)
-	pending := s.pending.Add(guard.Pending{
+	pending := guard.Pending{
 		Profile:        profileName,
 		SQL:            sql,
 		Origin:         result.Origin,
 		Classification: result.Classification,
-		Preview:        preview,
-	})
+		Preview:        s.previewImpact(ctx, conn, sql),
+	}
 
+	if result.Origin != guard.OriginHuman {
+		return s.awaitApproval(ctx, pending)
+	}
+
+	confirm := s.pending.Add(pending)
 	result.Status = QueryRequiresConfirmation
-	result.PendingID = pending.ID
-	result.Preview = &pending.Preview
-	result.Message = confirmationMessage(result.Classification, preview)
+	result.PendingID = confirm.ID
+	result.Preview = &confirm.Preview
+	result.Message = confirmationMessage(result.Classification, confirm.Preview)
 	return result
 }
 

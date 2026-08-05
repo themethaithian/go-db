@@ -24,14 +24,25 @@
 // # Decisions
 //
 // A withheld mutation waits in a Queue as a Pending, identified by an opaque
-// ID. It can be taken exactly once, which is what makes one confirmation
-// execute one statement. Policy differs by Origin: a human's mutation raises an
-// Inline Confirm and a queue entry; an AI's waits in the Approval Console.
+// ID, and is decided exactly once — which is what makes one approval execute
+// one statement. Policy differs by Origin, and the Queue keeps the two apart.
+//
+// A human's mutation is Added and Taken: the editor raises an Inline Confirm,
+// the editor answers it, and nothing is blocked in between. An AI's is
+// Submitted, which hands the submitting goroutine a Waiter it blocks on until a
+// human Decides it in the Approval Console, ApprovalTimeout passes and it
+// auto-rejects, or its caller gives up. Console lists what is waiting, oldest
+// first, with the deadline each entry will decide itself at. Timer is the port
+// that deadline is measured with, so a test expires an approval rather than
+// waiting one out.
 //
 // Every decision is written through the AuditLog port as a Record, with the
 // preview's advisory count beside the affected-row count the database really
-// reported. NewJSONLAuditLog is the append-only JSONL adapter (ADR 0004); Clock
-// is the port that makes a Record's timestamps testable.
+// reported. The Decision says which path it took — confirmed and cancelled in
+// the editor, approved, rejected and timeout in the console — and the Decider
+// says whether a person was involved at all. NewJSONLAuditLog is the
+// append-only JSONL adapter (ADR 0004); Clock is the port that makes a Record's
+// timestamps testable.
 //
 // Nothing in this package opens a connection or runs a query. It plans, judges,
 // and remembers; the App Service executes.

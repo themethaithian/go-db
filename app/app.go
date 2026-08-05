@@ -113,3 +113,22 @@ func (a *App) ConfirmPending(id string) service.QueryResult {
 func (a *App) CancelPending(id string) service.QueryResult {
 	return a.svc.CancelPending(id)
 }
+
+// ListPendingApprovals returns every AI-originated mutation currently
+// waiting in the Approval Console, oldest first. The console polls this to
+// stay live.
+func (a *App) ListPendingApprovals() []guard.Waiting {
+	return a.svc.ListPendingApprovals()
+}
+
+// ApprovePending lets the Approval Console entry waiting under id run. The
+// ack is not the query's result — that goes back to the AI Origin still
+// blocked on it.
+func (a *App) ApprovePending(id string) service.ApprovalAck {
+	return a.svc.ApprovePending(id)
+}
+
+// RejectPending refuses the Approval Console entry waiting under id.
+func (a *App) RejectPending(id string) service.ApprovalAck {
+	return a.svc.RejectPending(id)
+}

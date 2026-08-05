@@ -49,12 +49,69 @@ func (c *fakeClock) Now() time.Time {
 	return now
 }
 
+// approvalTimeout is the deadline the gate under test counts down from. It is
+// never waited out: the fake timer below is what expires it.
+const approvalTimeout = 90 * time.Second
+
+// armDeadline bounds a wait for something another goroutine is about to do. It
+// is a failure guard, not a delay — a test reaches it only when the thing it is
+// waiting for never happens.
+const armDeadline = 5 * time.Second
+
+// fakeTimer stands in for time.After, so an approval expiring is something a
+// test does rather than something it waits out.
+type fakeTimer struct {
+	armed chan int // the index of each timer, as it is armed
+
+	mu    sync.Mutex
+	chans []chan time.Time
+}
+
+func newFakeTimer() *fakeTimer { return &fakeTimer{armed: make(chan int, 64)} }
+
+// After implements guard.Timer.
+func (f *fakeTimer) After(time.Duration) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+
+	f.mu.Lock()
+	f.chans = append(f.chans, ch)
+	index := len(f.chans) - 1
+	f.mu.Unlock()
+
+	f.armed <- index
+	return ch
+}
+
+// next blocks until another approval deadline is armed and returns its index.
+// Arming it is the last thing a submission does before it blocks, so this is
+// also how a test knows the caller is waiting.
+func (f *fakeTimer) next(t *testing.T) int {
+	t.Helper()
+
+	select {
+	case index := <-f.armed:
+		return index
+	case <-time.After(armDeadline):
+		t.Fatal("no approval deadline was armed; nothing is waiting for a decision")
+		return 0
+	}
+}
+
+// expire fires the deadline under index, as the wall clock would reach it.
+func (f *fakeTimer) expire(index int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.chans[index] <- time.Time{}
+}
+
 // gate is a facade with one connected Profile over a fake database, a real
-// JSONL audit log, and a clock the test drives.
+// JSONL audit log, and a clock and an approval deadline the test drives.
 type gate struct {
 	svc      *service.AppService
 	driver   *dbtest.FakeDriver
 	clock    *fakeClock
+	timer    *fakeTimer
 	auditDir string
 }
 
@@ -63,13 +120,16 @@ func newGate(t *testing.T) *gate {
 
 	driver := dbtest.NewFakeDriver()
 	clock := newFakeClock(gateStart)
+	timer := newFakeTimer()
 	auditDir := t.TempDir()
 
-	svc := service.NewWithDriver(
+	svc := service.NewWithApproval(
 		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()),
 		driver,
 		guard.NewJSONLAuditLog(auditDir),
 		clock.Now,
+		approvalTimeout,
+		timer.After,
 	)
 	t.Cleanup(func() {
 		if err := svc.Close(); err != nil {
@@ -82,7 +142,57 @@ func newGate(t *testing.T) *gate {
 	if err := svc.Connect(context.Background(), "local"); err != nil {
 		t.Fatalf("Connect(local): %v", err)
 	}
-	return &gate{svc: svc, driver: driver, clock: clock, auditDir: auditDir}
+	return &gate{svc: svc, driver: driver, clock: clock, timer: timer, auditDir: auditDir}
+}
+
+// submit runs an AI-originated query on its own goroutine — as the localhost
+// API handler does for the MCP proxy — and returns the channel its result will
+// arrive on. It returns once the submission is genuinely blocked: arming the
+// approval deadline is the last thing RunQuery does before it waits.
+func (g *gate) submit(t *testing.T, ctx context.Context, sql string) <-chan service.QueryResult {
+	t.Helper()
+
+	results := make(chan service.QueryResult, 1)
+	go func() { results <- g.svc.RunQuery(ctx, "local", sql, guard.OriginAI) }()
+	g.timer.next(t)
+	return results
+}
+
+// stillBlocked asserts that the submitting call has not come back. It is only
+// meaningful after the deadline is armed, which is when the caller is known to
+// be inside its wait.
+func stillBlocked(t *testing.T, results <-chan service.QueryResult) {
+	t.Helper()
+
+	select {
+	case got := <-results:
+		t.Fatalf("RunQuery returned %q before anybody decided it: %s", got.Status, got.Message)
+	default:
+	}
+}
+
+// answered returns what the blocked caller finally got.
+func answered(t *testing.T, results <-chan service.QueryResult) service.QueryResult {
+	t.Helper()
+
+	select {
+	case got := <-results:
+		return got
+	case <-time.After(armDeadline):
+		t.Fatal("RunQuery never returned; the AI's call is stuck waiting for a decision nobody can make")
+		return service.QueryResult{}
+	}
+}
+
+// onlyWaiting returns the single entry in the Approval Console.
+func (g *gate) onlyWaiting(t *testing.T) guard.Waiting {
+	t.Helper()
+
+	waiting := g.svc.ListPendingApprovals()
+	if len(waiting) != 1 {
+		t.Fatalf("the Approval Console holds %d entries, want exactly 1: %+v", len(waiting), waiting)
+	}
+	return waiting[0]
 }
 
 // scriptPreview teaches the fake database to answer the Impact Preview of sql:
@@ -494,23 +604,382 @@ func TestBackstopReroutesTheHumanIntoConfirmation(t *testing.T) {
 	}
 }
 
-// TestAIMutationsWaitForTheApprovalConsole pins the Origin split. Inline
-// Confirm is the human's policy; an AI-originated mutation is withheld for the
-// Approval Console, which is a later slice — and until it exists, nothing
-// previews or queues on its behalf.
-func TestAIMutationsWaitForTheApprovalConsole(t *testing.T) {
+// TestAIMutationBlocksUntilTheHumanApproves is the Approval Console end to end,
+// and the claim the whole slice exists for: the AI's call does not come back
+// with a status to poll — it stops, inside the call, until a human answers, and
+// then answers with what actually happened to the rows.
+func TestAIMutationBlocksUntilTheHumanApproves(t *testing.T) {
 	g := newGate(t)
+	g.scriptPreview(t, updateOne, 3, sampleRows())
+	g.driver.Affect("local", 2)
+
+	results := g.submit(t, context.Background(), updateOne)
+
+	stillBlocked(t, results)
+	if execs := g.driver.Execs("local"); len(execs) != 0 {
+		t.Fatalf("the database executed %v while the query was still waiting for approval", execs)
+	}
+	if len(g.records(t)) != 0 {
+		t.Error("a request nobody has answered yet was written to the audit log")
+	}
+
+	// The console shows the human what they are deciding: the statement, the
+	// Impact Preview, and how long is left before it decides itself.
+	waiting := g.onlyWaiting(t)
+	if waiting.SQL != updateOne || waiting.Origin != guard.OriginAI || waiting.Profile != "local" {
+		t.Errorf("console entry = %+v, want the submission as it was made", waiting.Pending)
+	}
+	if !waiting.Preview.Available || waiting.Preview.Count != 3 {
+		t.Errorf("console preview = %+v, want the advisory count of 3", waiting.Preview)
+	}
+	if waiting.RemainingMillis <= 0 || waiting.RemainingMillis > approvalTimeout.Milliseconds() {
+		t.Errorf("remaining = %dms, want what is left of %s", waiting.RemainingMillis, approvalTimeout)
+	}
+
+	// Approving acknowledges and returns; it does not carry the result. The
+	// statement runs on the goroutine that submitted it, so the rows go back to
+	// the agent that asked for them.
+	ack := g.svc.ApprovePending(waiting.ID)
+	if !ack.OK {
+		t.Fatalf("ApprovePending = %+v, want it to find the waiting mutation", ack)
+	}
+
+	got := answered(t, results)
+	if got.Status != service.QueryExecuted {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryExecuted, got.Message)
+	}
+	if got.AffectedRows != 2 {
+		t.Errorf("AffectedRows = %d, want the 2 the database reported", got.AffectedRows)
+	}
+	if got.Origin != guard.OriginAI {
+		t.Errorf("Origin = %q, want it carried back with the result", got.Origin)
+	}
+	if got.Preview == nil || got.Preview.Count != 3 {
+		t.Errorf("preview = %+v, want the estimate echoed beside the outcome", got.Preview)
+	}
+	if !strings.Contains(got.Message, "2") {
+		t.Errorf("message = %q, want it to say how many rows changed", got.Message)
+	}
+
+	// The statement runs exactly as the agent submitted it, and exactly once.
+	if execs := g.driver.Execs("local"); !equalStrings(execs, []string{updateOne}) {
+		t.Fatalf("the database executed %v, want the submitted statement once", execs)
+	}
+	if len(g.svc.ListPendingApprovals()) != 0 {
+		t.Error("the console still offers a mutation that has been approved and run")
+	}
+
+	record := g.onlyRecord(t)
+	for field, want := range map[string]any{
+		"origin":         "ai",
+		"profile":        "local",
+		"sql":            updateOne,
+		"decision":       "approved",
+		"decider":        "human",
+		"advisory_count": float64(3),
+		"affected_rows":  float64(2),
+	} {
+		if record[field] != want {
+			t.Errorf("audit %s = %v, want %v", field, record[field], want)
+		}
+	}
+	requested, decided, executed := record["requested_at"].(string), record["decided_at"].(string), record["executed_at"].(string)
+	for _, pair := range [][2]string{{requested, decided}, {decided, executed}} {
+		if !(pair[0] < pair[1]) {
+			t.Errorf("audit timestamps out of order: %s then %s", pair[0], pair[1])
+		}
+	}
+}
+
+// TestAIMutationRejectedByTheHuman: the refusal reaches the agent as a clear
+// outcome rather than a hang or an error, and nothing ran.
+func TestAIMutationRejectedByTheHuman(t *testing.T) {
+	g := newGate(t)
+	g.scriptPreview(t, updateOne, 3, sampleRows())
+	g.driver.Affect("local", 2)
+
+	results := g.submit(t, context.Background(), updateOne)
+	waiting := g.onlyWaiting(t)
+
+	if ack := g.svc.RejectPending(waiting.ID); !ack.OK {
+		t.Fatalf("RejectPending = %+v, want it to find the waiting mutation", ack)
+	}
+
+	got := answered(t, results)
+	if got.Status != service.QueryRejected {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRejected, got.Message)
+	}
+	if got.Message == "" {
+		t.Error("no message; a rejected agent has to be told why nothing happened")
+	}
+	if execs := g.driver.Execs("local"); len(execs) != 0 {
+		t.Fatalf("a rejected mutation executed %v", execs)
+	}
+
+	record := g.onlyRecord(t)
+	if record["decision"] != "rejected" || record["decider"] != "human" {
+		t.Errorf("audit decision/decider = %v/%v, want rejected/human", record["decision"], record["decider"])
+	}
+	if record["advisory_count"] != float64(3) {
+		t.Errorf("audit advisory_count = %v, want the 3 the human was shown", record["advisory_count"])
+	}
+	for _, absent := range []string{"affected_rows", "executed_at"} {
+		if _, present := record[absent]; present {
+			t.Errorf("a rejected mutation recorded %s = %v", absent, record[absent])
+		}
+	}
+}
+
+// TestAIMutationAutoRejectsAtTheDeadline: nobody was at the keyboard. Silence
+// is a no, the agent is told so rather than waiting forever, and the record
+// says plainly that no human was involved.
+func TestAIMutationAutoRejectsAtTheDeadline(t *testing.T) {
+	g := newGate(t)
+	g.scriptPreview(t, updateOne, 3, sampleRows())
+	g.driver.Affect("local", 2)
+
+	results := g.submit(t, context.Background(), updateOne)
+	stillBlocked(t, results)
+
+	g.timer.expire(0)
+
+	got := answered(t, results)
+	if got.Status != service.QueryTimedOut {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryTimedOut, got.Message)
+	}
+	if !strings.Contains(got.Message, approvalTimeout.String()) {
+		t.Errorf("message = %q, want it to say how long nobody answered for", got.Message)
+	}
+	if execs := g.driver.Execs("local"); len(execs) != 0 {
+		t.Fatalf("a mutation nobody approved executed %v", execs)
+	}
+	if len(g.svc.ListPendingApprovals()) != 0 {
+		t.Error("the console still offers a mutation that already timed out")
+	}
+
+	record := g.onlyRecord(t)
+	if record["decision"] != "timeout" {
+		t.Errorf("audit decision = %v, want \"timeout\"", record["decision"])
+	}
+	if record["decider"] != "timeout" {
+		t.Errorf("audit decider = %v, want \"timeout\": nobody pressed a key", record["decider"])
+	}
+	if _, present := record["affected_rows"]; present {
+		t.Errorf("an auto-rejected mutation recorded affected_rows = %v", record["affected_rows"])
+	}
+}
+
+// TestAIMutationWithdrawnWhenTheCallerGivesUp: the MCP client was killed, so
+// the query has nobody left to answer to. It leaves the console rather than
+// sitting there offering the human a decision that can no longer reach anyone —
+// and the attempt is still recorded, because it was still made.
+func TestAIMutationWithdrawnWhenTheCallerGivesUp(t *testing.T) {
+	g := newGate(t)
+	g.scriptPreview(t, updateOne, 3, sampleRows())
+	g.driver.Affect("local", 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	results := g.submit(t, ctx, updateOne)
+	stillBlocked(t, results)
+
+	cancel()
+
+	got := answered(t, results)
+	if got.Status != service.QueryCancelled {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryCancelled, got.Message)
+	}
+	if execs := g.driver.Execs("local"); len(execs) != 0 {
+		t.Fatalf("a withdrawn mutation executed %v", execs)
+	}
+	if len(g.svc.ListPendingApprovals()) != 0 {
+		t.Error("the console still offers a mutation nobody is waiting on")
+	}
+
+	record := g.onlyRecord(t)
+	if record["decision"] != "cancelled" {
+		t.Errorf("audit decision = %v, want \"cancelled\"", record["decision"])
+	}
+	if record["decider"] != "caller" {
+		t.Errorf("audit decider = %v, want \"caller\": no human refused it", record["decider"])
+	}
+}
+
+// TestApprovalConsoleIgnoresInlineConfirms is the Origin split at the facade.
+// A human's own mutation is answered in the editor; putting it in the console
+// would ask for the same decision twice, from a queue meant for the agent's.
+func TestApprovalConsoleIgnoresInlineConfirms(t *testing.T) {
+	g := newGate(t)
+	const agentSQL = "DELETE FROM users WHERE id = 2"
+	g.scriptPreview(t, updateOne, 3, sampleRows())
+	g.scriptPreview(t, agentSQL, 1, sampleRows())
+
+	inline := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	if inline.Status != service.QueryRequiresConfirmation {
+		t.Fatalf("the human's query = %q (%s)", inline.Status, inline.Message)
+	}
+	results := g.submit(t, context.Background(), agentSQL)
+
+	waiting := g.onlyWaiting(t)
+	if waiting.SQL != agentSQL {
+		t.Errorf("console entry = %q, want only the agent's %q", waiting.SQL, agentSQL)
+	}
+	if waiting.ID == inline.PendingID {
+		t.Error("the Inline Confirm is being offered in the Approval Console")
+	}
+
+	// Neither policy can answer the other's entry.
+	if ack := g.svc.ApprovePending(inline.PendingID); ack.OK {
+		t.Error("an Inline Confirm was approved from the Approval Console")
+	}
+	if got := g.svc.ConfirmPending(context.Background(), waiting.ID); got.Status != service.QueryUnknownPending {
+		t.Errorf("confirming a console entry from the editor = %q, want %q", got.Status, service.QueryUnknownPending)
+	}
+
+	if ack := g.svc.RejectPending(waiting.ID); !ack.OK {
+		t.Fatalf("RejectPending = %+v", ack)
+	}
+	if got := answered(t, results); got.Status != service.QueryRejected {
+		t.Errorf("the agent's query = %q, want %q", got.Status, service.QueryRejected)
+	}
+}
+
+// TestDecidingTwiceFindsNothing: the console's buttons are pressed by a human,
+// and a human presses twice. The second press must say cleanly that there is
+// nothing there rather than deciding something else.
+func TestDecidingTwiceFindsNothing(t *testing.T) {
+	g := newGate(t)
+	g.scriptPreview(t, updateOne, 3, sampleRows())
+
+	results := g.submit(t, context.Background(), updateOne)
+	waiting := g.onlyWaiting(t)
+
+	if ack := g.svc.RejectPending(waiting.ID); !ack.OK {
+		t.Fatalf("the first rejection found nothing: %+v", ack)
+	}
+	answered(t, results)
+
+	for name, ack := range map[string]service.ApprovalAck{
+		"ApprovePending": g.svc.ApprovePending(waiting.ID),
+		"RejectPending":  g.svc.RejectPending(waiting.ID),
+	} {
+		if ack.OK {
+			t.Errorf("%s decided an already-decided mutation", name)
+		}
+		if ack.Message == "" {
+			t.Errorf("%s reported nothing found without saying so", name)
+		}
+	}
+	if records := g.records(t); len(records) != 1 {
+		t.Errorf("the audit log holds %d records, want 1: a decision about nothing is not a decision", len(records))
+	}
+}
+
+func TestDecidingAnUnknownID(t *testing.T) {
+	g := newGate(t)
+
+	if ack := g.svc.ApprovePending("never-issued"); ack.OK {
+		t.Error("ApprovePending found a mutation under an ID that was never issued")
+	}
+	if ack := g.svc.RejectPending("never-issued"); ack.OK {
+		t.Error("RejectPending found a mutation under an ID that was never issued")
+	}
+	if execs := g.driver.Execs("local"); len(execs) != 0 {
+		t.Errorf("an unknown ID executed %v", execs)
+	}
+	if len(g.records(t)) != 0 {
+		t.Error("an unknown ID was written to the audit log")
+	}
+}
+
+// TestApprovalsAreIndependent: two agents can be waiting at once, and each
+// answer must reach the caller it belongs to and no other.
+func TestApprovalsAreIndependent(t *testing.T) {
+	g := newGate(t)
+	const other = "DELETE FROM users WHERE id = 2"
+	g.scriptPreview(t, updateOne, 3, sampleRows())
+	g.scriptPreview(t, other, 1, sampleRows())
+	g.driver.Affect("local", 1)
+
+	first := g.submit(t, context.Background(), updateOne)
+	second := g.submit(t, context.Background(), other)
+
+	waiting := g.svc.ListPendingApprovals()
+	if len(waiting) != 2 {
+		t.Fatalf("the console holds %d entries, want both: %+v", len(waiting), waiting)
+	}
+	if waiting[0].SQL != updateOne || waiting[1].SQL != other {
+		t.Errorf("console order = [%q %q], want the oldest request first", waiting[0].SQL, waiting[1].SQL)
+	}
+
+	if ack := g.svc.RejectPending(waiting[0].ID); !ack.OK {
+		t.Fatalf("RejectPending(first) = %+v", ack)
+	}
+	if ack := g.svc.ApprovePending(waiting[1].ID); !ack.OK {
+		t.Fatalf("ApprovePending(second) = %+v", ack)
+	}
+
+	if got := answered(t, first); got.Status != service.QueryRejected {
+		t.Errorf("the first caller got %q, want %q", got.Status, service.QueryRejected)
+	}
+	if got := answered(t, second); got.Status != service.QueryExecuted {
+		t.Errorf("the second caller got %q, want %q", got.Status, service.QueryExecuted)
+	}
+	if execs := g.driver.Execs("local"); !equalStrings(execs, []string{other}) {
+		t.Errorf("the database executed %v, want only the approved statement", execs)
+	}
+	if records := g.records(t); len(records) != 2 {
+		t.Errorf("the audit log holds %d records, want one per decision", len(records))
+	}
+}
+
+// TestAIMutationOnADisconnectedProfile: there is nowhere to preview it and
+// nowhere to run it, so the agent is told that now rather than a human being
+// asked to approve a statement that cannot go anywhere.
+func TestAIMutationOnADisconnectedProfile(t *testing.T) {
+	g := newGate(t)
+	if err := g.svc.Disconnect("local"); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
 
 	got := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginAI)
 
-	if got.Status != service.QueryRequiresApproval {
-		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresApproval, got.Message)
+	if got.Status != service.QueryNotConnected {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryNotConnected, got.Message)
 	}
-	if got.PendingID != "" {
-		t.Errorf("an AI mutation was queued as %q; the Approval Console is a later slice", got.PendingID)
+	if len(g.svc.ListPendingApprovals()) != 0 {
+		t.Error("a mutation was queued against a Profile with no connection")
 	}
-	if execs := g.driver.Execs("local"); len(execs) != 0 {
-		t.Errorf("an AI mutation executed %v", execs)
+}
+
+// TestAIBackstoppedReadWaitsForApproval: a statement the classifier called a
+// read and the database refused as a write takes the AI's route too — the
+// Approval Console, not a bare refusal.
+func TestAIBackstoppedReadWaitsForApproval(t *testing.T) {
+	g := newGate(t)
+	g.driver.RejectWrites("local")
+	g.driver.Affect("local", 1)
+
+	results := g.submit(t, context.Background(), "SELECT record_visit(1)")
+
+	waiting := g.onlyWaiting(t)
+	if waiting.Classification != guard.Backstopped() {
+		t.Errorf("classification = %+v, want %+v", waiting.Classification, guard.Backstopped())
+	}
+	if waiting.Preview.Available {
+		t.Errorf("preview = %+v, want none for a statement nobody can rewrite", waiting.Preview)
+	}
+
+	if ack := g.svc.ApprovePending(waiting.ID); !ack.OK {
+		t.Fatalf("ApprovePending = %+v", ack)
+	}
+	if got := answered(t, results); got.Status != service.QueryExecuted {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryExecuted, got.Message)
+	}
+	if execs := g.driver.Execs("local"); !equalStrings(execs, []string{"SELECT record_visit(1)"}) {
+		t.Errorf("the database executed %v, want the statement as written", execs)
+	}
+	if record := g.onlyRecord(t); record["decision"] != "approved" {
+		t.Errorf("audit decision = %v, want \"approved\"", record["decision"])
 	}
 }
 

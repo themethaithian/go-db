@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/themethaithian/go-db/internal/guard"
 )
 
 // tokenFileName is the file internal/api.Server writes inside the app's
@@ -20,10 +22,22 @@ import (
 // reads the file's JSON shape directly rather than the type that wrote it.
 const tokenFileName = "api.json"
 
-// requestTimeout bounds every call the proxy makes to the localhost API. It
-// exists so a dead or stale endpoint fails fast: an MCP client waiting on a
+// requestTimeout bounds the calls that have no reason to take any time at all.
+// It exists so a dead or stale endpoint fails fast: an MCP client waiting on a
 // tool call must see a readable error in a few seconds, never a hang.
 const requestTimeout = 5 * time.Second
+
+// queryTimeout bounds a call to /query, the one request that can legitimately
+// take minutes. A mutating statement waits in the app's Approval Console until
+// a human answers it, and this call waits with it — giving up sooner would
+// abandon the request exactly when the human is about to approve it, and the
+// agent would be told the app was gone. The margin over the gate's own deadline
+// covers running the statement afterwards.
+//
+// It is derived from the gate's deadline rather than restated as a number of
+// its own: two constants that had to agree, in two packages, would drift, and
+// the drift would only ever show up when a human was slow to answer.
+const queryTimeout = guard.ApprovalTimeout + 30*time.Second
 
 // notRunningMessage is the one sentence surfaced for every way the app can be
 // unreachable — no token file, a stale one, a refused connection, a rejected
@@ -43,11 +57,12 @@ type tokenFilePayload struct {
 // this proxy needs. It mirrors service.QueryResult's JSON tags without
 // importing internal/service: the wire contract is the seam, not the Go type.
 type queryResponse struct {
-	Status    string      `json:"status"`
-	Message   string      `json:"message"`
-	Columns   []string    `json:"columns,omitempty"`
-	Rows      [][]*string `json:"rows,omitempty"`
-	Truncated bool        `json:"truncated"`
+	Status       string      `json:"status"`
+	Message      string      `json:"message"`
+	Columns      []string    `json:"columns,omitempty"`
+	Rows         [][]*string `json:"rows,omitempty"`
+	Truncated    bool        `json:"truncated"`
+	AffectedRows int64       `json:"affected_rows"`
 }
 
 // connectResponse mirrors the localhost API's /connect response body.
@@ -67,11 +82,11 @@ type proxy struct {
 }
 
 func newProxy(configDir, profileName string) *proxy {
-	return &proxy{
-		configDir: configDir,
-		profile:   profileName,
-		client:    &http.Client{Timeout: requestTimeout},
-	}
+	// The client carries no timeout of its own: how long a call may take is a
+	// per-endpoint answer, and do applies it. One shared deadline would have to
+	// be the longest one, which would let a dead app hang a health check for
+	// two and a half minutes.
+	return &proxy{configDir: configDir, profile: profileName, client: &http.Client{}}
 }
 
 // endpoint reads api.json fresh. Any failure to read or parse it — missing
@@ -89,12 +104,15 @@ func (p *proxy) endpoint() (tokenFilePayload, error) {
 	return payload, nil
 }
 
-// do sends one request to the localhost API and returns its raw body.
-// Anything that keeps the response from arriving — a dead port, a refused
-// connection, a rejected token, a body that never finishes — collapses to
-// errNotRunning: none of them are actionable by the caller beyond "start the
-// app and try again."
-func (p *proxy) do(ctx context.Context, method, path string, body any) ([]byte, error) {
+// do sends one request to the localhost API, allowing it timeout to answer,
+// and returns its raw body. Anything that keeps the response from arriving — a
+// dead port, a refused connection, a rejected token, a body that never
+// finishes — collapses to errNotRunning: none of them are actionable by the
+// caller beyond "start the app and try again."
+func (p *proxy) do(ctx context.Context, timeout time.Duration, method, path string, body any) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	ep, err := p.endpoint()
 	if err != nil {
 		return nil, err
@@ -139,9 +157,11 @@ func (p *proxy) do(ctx context.Context, method, path string, body any) ([]byte, 
 }
 
 // query submits sql on the pinned Profile with Origin "ai", once, with no
-// retry logic of its own — runQuery is what callers use.
+// retry logic of its own — runQuery is what callers use. It waits out the
+// Approval Console: a mutating statement does not come back until a human has
+// decided it or its deadline has passed.
 func (p *proxy) query(ctx context.Context, sql string) (queryResponse, error) {
-	data, err := p.do(ctx, http.MethodPost, "/query", map[string]string{
+	data, err := p.do(ctx, queryTimeout, http.MethodPost, "/query", map[string]string{
 		"profile": p.profile,
 		"sql":     sql,
 		"origin":  "ai",
@@ -166,7 +186,7 @@ func (p *proxy) runQuery(ctx context.Context, sql string) (queryResponse, error)
 		return resp, err
 	}
 
-	data, err := p.do(ctx, http.MethodPost, "/connect", map[string]string{"profile": p.profile})
+	data, err := p.do(ctx, requestTimeout, http.MethodPost, "/connect", map[string]string{"profile": p.profile})
 	if err != nil {
 		return queryResponse{}, err
 	}

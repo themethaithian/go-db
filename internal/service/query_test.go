@@ -159,11 +159,13 @@ func TestRunQueryRerouteOnBackstop(t *testing.T) {
 	svc := newQueryFacade(t, driver)
 
 	// A SELECT calling a function that writes: provably read-only to the
-	// classifier, refused by the database.
-	got := svc.RunQuery(context.Background(), "local", "SELECT record_visit(1)", guard.OriginAI)
+	// classifier, refused by the database. The Origin decides what happens next
+	// — the AI's route is TestAIBackstoppedReadWaitsForApproval — and what this
+	// test states holds for both: the reroute is visible in the result.
+	got := svc.RunQuery(context.Background(), "local", "SELECT record_visit(1)", guard.OriginHuman)
 
-	if got.Status != service.QueryRequiresApproval {
-		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresApproval, got.Message)
+	if got.Status != service.QueryRequiresConfirmation {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
 	}
 	if got.Classification.Kind != guard.Mutation {
 		t.Errorf("classification = %+v, want the reroute to be visible as a mutation", got.Classification)
@@ -174,8 +176,8 @@ func TestRunQueryRerouteOnBackstop(t *testing.T) {
 	if !strings.Contains(got.Message, got.Classification.Reason) {
 		t.Errorf("message %q does not say why the query was rerouted", got.Message)
 	}
-	if got.Origin != guard.OriginAI {
-		t.Errorf("Origin = %q, want %q", got.Origin, guard.OriginAI)
+	if got.Origin != guard.OriginHuman {
+		t.Errorf("Origin = %q, want %q", got.Origin, guard.OriginHuman)
 	}
 	if got.Rows != nil {
 		t.Errorf("a rerouted query returned rows: %v", got.Rows)

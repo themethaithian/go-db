@@ -10,20 +10,41 @@ import (
 	"time"
 )
 
-// Decision is what a human did with a withheld mutation.
+// Decision is what became of a withheld mutation. The two policies use
+// different words on purpose: reading the log a week later, "confirmed" is a
+// human answering their own query in the editor and "approved" is a human
+// answering an agent's, and those are not the same event.
 type Decision string
 
 const (
-	// Confirmed means the human let the mutation run.
+	// Confirmed means the human let their own mutation run — Inline Confirm.
 	Confirmed Decision = "confirmed"
-	// Cancelled means the human refused it. Nothing was executed.
+	// Cancelled means it was refused without running: the human said no in the
+	// editor, or the caller that submitted it went away before anyone answered.
 	Cancelled Decision = "cancelled"
+	// Approved means a human let an AI's mutation run from the Approval
+	// Console.
+	Approved Decision = "approved"
+	// Rejected means a human refused an AI's mutation in the Approval Console.
+	// Nothing was executed.
+	Rejected Decision = "rejected"
+	// TimedOut means nobody answered an AI's mutation before its deadline, so
+	// the Approval Console rejected it. Nothing was executed — silence is a no.
+	TimedOut Decision = "timeout"
 )
 
-// DeciderHuman is the only decider there is today. The field exists because
-// there will be others — a timeout auto-reject decides without a human, and its
-// records must not look like someone pressed a key.
-const DeciderHuman = "human"
+const (
+	// DeciderHuman marks a decision somebody actually made: a keypress in the
+	// editor or a click in the Approval Console.
+	DeciderHuman = "human"
+	// DeciderTimeout marks an auto-reject at the deadline. It exists so those
+	// records do not look like someone pressed a key.
+	DeciderTimeout = "timeout"
+	// DeciderCaller marks a mutation withdrawn by whoever submitted it — an
+	// agent that gave up, an MCP client that was killed — before any human
+	// answered. Nobody refused it; there was simply no longer anyone to tell.
+	DeciderCaller = "caller"
+)
 
 // Record is one Approval Gate decision, as written to the audit log.
 //

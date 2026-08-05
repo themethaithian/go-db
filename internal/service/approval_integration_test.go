@@ -26,12 +26,23 @@ import (
 // Profile, plus the directory its audit log is written to.
 func confirming(t *testing.T, host string, port int) (*service.AppService, string) {
 	t.Helper()
+	return approving(t, host, port, 0)
+}
+
+// approving is confirming with the Approval Console's deadline shortened to
+// something a test can afford to wait out. These run on the wall clock — the
+// point of an integration test is that the real machinery is in play — so the
+// timeout under test is short rather than faked.
+func approving(t *testing.T, host string, port int, timeout time.Duration) (*service.AppService, string) {
+	t.Helper()
 
 	auditDir := t.TempDir()
-	svc := service.NewWithDriver(
+	svc := service.NewWithApproval(
 		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()),
 		db.NewMySQLDriver(),
 		guard.NewJSONLAuditLog(auditDir),
+		nil,
+		timeout,
 		nil,
 	)
 	t.Cleanup(func() {
@@ -356,5 +367,195 @@ func TestIntegrationPreviewHoldsNoLocks(t *testing.T) {
 	defer cancel()
 	if _, err := pool.ExecContext(locked, "UPDATE unlocked_users SET name = 'someone else' WHERE id = 1"); err != nil {
 		t.Fatalf("writing a previewed row while the confirmation is open: %v; the preview is holding locks", err)
+	}
+}
+
+// These run the AI write path against a real MySQL 8. The blocking is real —
+// the query waits in a goroutine while the test plays the human at the
+// Approval Console — so what these prove that a fake cannot is that the rows
+// really moved, or really did not, on the far side of a decision that was made
+// somewhere else entirely.
+
+// submitAI runs an AI-originated query in its own goroutine, as the localhost
+// API handler does for the MCP proxy, and returns the channel its result will
+// arrive on.
+func submitAI(svc *service.AppService, ctx context.Context, sql string) <-chan service.QueryResult {
+	results := make(chan service.QueryResult, 1)
+	go func() { results <- svc.RunQuery(ctx, "local", sql, guard.OriginAI) }()
+	return results
+}
+
+// waitingInConsole polls the Approval Console until the submitted mutation
+// shows up there. The submitting goroutine is real here, so the test watches
+// for it to arrive rather than being handed a synchronisation point.
+func waitingInConsole(t *testing.T, svc *service.AppService) guard.Waiting {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if waiting := svc.ListPendingApprovals(); len(waiting) == 1 {
+			return waiting[0]
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("nothing ever reached the Approval Console")
+	return guard.Waiting{}
+}
+
+// decidedBy returns what the blocked caller finally got.
+func decidedBy(t *testing.T, results <-chan service.QueryResult) service.QueryResult {
+	t.Helper()
+
+	select {
+	case got := <-results:
+		return got
+	case <-time.After(30 * time.Second):
+		t.Fatal("the AI's call never returned; it is stuck waiting for a decision")
+		return service.QueryResult{}
+	}
+}
+
+// TestIntegrationApprovalConsoleUpdate is the AI write path end to end against
+// a real server: the query waits, a human approves it somewhere else, and the
+// rows the preview described are the rows that actually change — with both
+// numbers in the record.
+func TestIntegrationApprovalConsoleUpdate(t *testing.T) {
+	host, port := requireMySQL(t)
+	pool := adminPool(t, host, port)
+	seed(t, pool, "approved_users",
+		"CREATE TABLE approved_users (id INT PRIMARY KEY, name VARCHAR(32) NOT NULL, stale TINYINT NOT NULL)",
+		"INSERT INTO approved_users VALUES (1,'ada',1), (2,'grace',1), (3,'alan',0)",
+	)
+	svc, auditDir := confirming(t, host, port)
+	ctx := timeout(t)
+
+	const update = "UPDATE approved_users SET name = 'archived' WHERE stale = 1"
+	results := submitAI(svc, ctx, update)
+
+	waiting := waitingInConsole(t, svc)
+	if waiting.SQL != update || waiting.Origin != guard.OriginAI {
+		t.Fatalf("console entry = %+v, want the agent's statement", waiting.Pending)
+	}
+	if !waiting.Preview.Available || waiting.Preview.Count != 2 {
+		t.Errorf("advisory count = %+v, want the 2 rows the WHERE clause matches", waiting.Preview)
+	}
+	if waiting.RemainingMillis <= 0 {
+		t.Errorf("remaining = %dms, want time left on the default deadline", waiting.RemainingMillis)
+	}
+
+	// Nothing has happened while the query waits.
+	if got := names(t, pool, "approved_users"); !equalStrings(got, []string{"ada", "grace", "alan"}) {
+		t.Fatalf("table holds %v while the approval is pending, want it untouched", got)
+	}
+
+	if ack := svc.ApprovePending(waiting.ID); !ack.OK {
+		t.Fatalf("ApprovePending = %+v", ack)
+	}
+
+	got := decidedBy(t, results)
+	if got.Status != service.QueryExecuted {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryExecuted, got.Message)
+	}
+	if got.AffectedRows != 2 {
+		t.Errorf("AffectedRows = %d, want 2", got.AffectedRows)
+	}
+	if got := names(t, pool, "approved_users"); !equalStrings(got, []string{"archived", "archived", "alan"}) {
+		t.Errorf("table holds %v, want the two stale rows archived", got)
+	}
+
+	records := auditRecords(t, auditDir)
+	if len(records) != 1 {
+		t.Fatalf("the audit log holds %d records, want 1", len(records))
+	}
+	for field, want := range map[string]any{
+		"origin":         "ai",
+		"decision":       "approved",
+		"decider":        "human",
+		"advisory_count": float64(2),
+		"affected_rows":  float64(2),
+		"sql":            update,
+	} {
+		if records[0][field] != want {
+			t.Errorf("audit %s = %v, want %v", field, records[0][field], want)
+		}
+	}
+}
+
+// TestIntegrationApprovalConsoleRejectLeavesTheDataAlone: the refusal path,
+// proven where it matters — against the rows themselves.
+func TestIntegrationApprovalConsoleRejectLeavesTheDataAlone(t *testing.T) {
+	host, port := requireMySQL(t)
+	pool := adminPool(t, host, port)
+	seed(t, pool, "rejected_users",
+		"CREATE TABLE rejected_users (id INT PRIMARY KEY, name VARCHAR(32) NOT NULL)",
+		"INSERT INTO rejected_users VALUES (1,'ada'), (2,'grace')",
+	)
+	svc, auditDir := confirming(t, host, port)
+	ctx := timeout(t)
+
+	results := submitAI(svc, ctx, "DELETE FROM rejected_users")
+	waiting := waitingInConsole(t, svc)
+
+	if ack := svc.RejectPending(waiting.ID); !ack.OK {
+		t.Fatalf("RejectPending = %+v", ack)
+	}
+
+	got := decidedBy(t, results)
+	if got.Status != service.QueryRejected {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRejected, got.Message)
+	}
+	if got := names(t, pool, "rejected_users"); !equalStrings(got, []string{"ada", "grace"}) {
+		t.Errorf("table holds %v, want [ada grace]: a rejected DELETE ran", got)
+	}
+
+	records := auditRecords(t, auditDir)
+	if len(records) != 1 {
+		t.Fatalf("the audit log holds %d records, want the refusal recorded", len(records))
+	}
+	if records[0]["decision"] != "rejected" || records[0]["decider"] != "human" {
+		t.Errorf("audit decision/decider = %v/%v, want rejected/human", records[0]["decision"], records[0]["decider"])
+	}
+	if _, present := records[0]["affected_rows"]; present {
+		t.Error("a rejected DELETE recorded affected rows")
+	}
+}
+
+// TestIntegrationApprovalTimeoutLeavesTheDataAlone is the auto-reject on the
+// real clock: nobody was at the keyboard, the deadline passed, and the DELETE
+// never reached the server. The deadline is short here for obvious reasons; the
+// unit tests fire it rather than wait for it.
+func TestIntegrationApprovalTimeoutLeavesTheDataAlone(t *testing.T) {
+	host, port := requireMySQL(t)
+	pool := adminPool(t, host, port)
+	seed(t, pool, "unanswered_users",
+		"CREATE TABLE unanswered_users (id INT PRIMARY KEY, name VARCHAR(32) NOT NULL)",
+		"INSERT INTO unanswered_users VALUES (1,'ada'), (2,'grace')",
+	)
+	svc, auditDir := approving(t, host, port, 300*time.Millisecond)
+	ctx := timeout(t)
+
+	results := submitAI(svc, ctx, "DELETE FROM unanswered_users")
+
+	got := decidedBy(t, results)
+	if got.Status != service.QueryTimedOut {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryTimedOut, got.Message)
+	}
+	if got := names(t, pool, "unanswered_users"); !equalStrings(got, []string{"ada", "grace"}) {
+		t.Errorf("table holds %v, want [ada grace]: a DELETE nobody approved ran", got)
+	}
+	if pending := svc.ListPendingApprovals(); len(pending) != 0 {
+		t.Errorf("the console still offers %+v after the deadline passed", pending)
+	}
+
+	records := auditRecords(t, auditDir)
+	if len(records) != 1 {
+		t.Fatalf("the audit log holds %d records, want the auto-reject recorded", len(records))
+	}
+	if records[0]["decision"] != "timeout" || records[0]["decider"] != "timeout" {
+		t.Errorf("audit decision/decider = %v/%v, want timeout/timeout",
+			records[0]["decision"], records[0]["decider"])
+	}
+	if records[0]["advisory_count"] != float64(2) {
+		t.Errorf("audit advisory_count = %v, want the 2 rows nobody approved", records[0]["advisory_count"])
 	}
 }

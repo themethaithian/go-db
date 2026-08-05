@@ -38,9 +38,22 @@ const (
 
 	maxBodyBytes = 1 << 20 // 1 MB: generous for a SQL statement, small enough to bound abuse.
 
-	readTimeout  = 5 * time.Second
-	writeTimeout = 30 * time.Second // a query can legitimately take a while
-	idleTimeout  = 60 * time.Second
+	readTimeout = 5 * time.Second
+	idleTimeout = 60 * time.Second
+
+	// writeTimeout has to outlast the longest legitimate response, and the
+	// longest one this API has is a mutating query: it blocks in the Approval
+	// Console until a human answers it or its deadline passes. A deadline
+	// shorter than that would cut the connection at the worst possible moment —
+	// the human approves, the mutation runs, and the agent that asked for it is
+	// told the app went away. The margin covers the query's own execution
+	// afterwards.
+	//
+	// It is set on the whole server rather than per route because every other
+	// endpoint answers in microseconds, and a generous deadline on a
+	// loopback-only, token-gated listener buys an attacker who already has the
+	// token nothing they did not already have.
+	writeTimeout = guard.ApprovalTimeout + 60*time.Second
 
 	shutdownTimeout = 5 * time.Second
 )
@@ -333,6 +346,16 @@ type queryRequest struct {
 	Origin  guard.Origin `json:"origin"`
 }
 
+// handleQuery passes one query to the facade and marshals what comes back.
+//
+// It can block for minutes and that is correct: an AI-originated mutation waits
+// in the Approval Console inside this call, so the agent that asked for it gets
+// the real outcome on the request it already made rather than a token to poll
+// with. Two things make that safe, and both are load-bearing. The server's
+// writeTimeout outlasts the approval deadline, and the request's own context is
+// what the facade waits on — so an MCP client that dies takes its pending
+// mutation out of the console with it instead of leaving a human to approve a
+// statement nobody is listening for.
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

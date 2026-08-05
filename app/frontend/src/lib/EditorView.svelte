@@ -174,12 +174,12 @@
       </div>
     {:else if result.status === "cancelled"}
       <p class="text-sm text-text-muted">Cancelled — nothing was executed.</p>
-    {:else if result.status === "requires_approval"}
-      <div class="rounded-panel border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
-        <p>{result.message}</p>
-        <p class="mt-1 text-xs text-warning/80">Reason: {result.classification.reason}</p>
-      </div>
     {:else}
+      <!-- Covers failed, not_connected, unknown_pending, and rejected/timed_out
+           (Approval Console outcomes) — the last two can't reach a human-origin
+           editor session in practice, since only the editor's own Inline
+           Confirm ever runs here, but rendering them as danger notices costs
+           nothing and keeps this branch honest if that ever changes. -->
       <div class="rounded-panel border border-danger/40 bg-danger/10 p-4 text-sm text-danger">
         <p>{result.message}</p>
       </div>

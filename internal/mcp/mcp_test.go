@@ -45,13 +45,19 @@ type testApp struct {
 	driver *dbtest.FakeDriver
 }
 
+// approvalTimeout is how long a mutation waits in this app's Approval Console
+// before it auto-rejects. It is short because these tests play both sides — the
+// agent asking and the human answering — and the shipping deadline is two
+// minutes.
+const approvalTimeout = 300 * time.Millisecond
+
 func newTestApp(t *testing.T) *testApp {
 	t.Helper()
 
 	driver := dbtest.NewFakeDriver()
-	svc := service.NewWithDriver(
+	svc := service.NewWithApproval(
 		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver,
-		guard.NewJSONLAuditLog(t.TempDir()), nil,
+		guard.NewJSONLAuditLog(t.TempDir()), nil, approvalTimeout, nil,
 	)
 
 	dir := t.TempDir()
@@ -82,6 +88,22 @@ func (a *testApp) saveAndConnect(name, password string) {
 	if err := a.svc.Connect(context.Background(), name); err != nil {
 		a.t.Fatalf("Connect(%q): %v", name, err)
 	}
+}
+
+// waitingInConsole polls the app's Approval Console until the in-flight tool
+// call's mutation shows up there — the test playing the human who notices it.
+func (a *testApp) waitingInConsole(t *testing.T) guard.Waiting {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if waiting := a.svc.ListPendingApprovals(); len(waiting) == 1 {
+			return waiting[0]
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("nothing ever reached the Approval Console; the tool call is not waiting where it should be")
+	return guard.Waiting{}
 }
 
 // connectClient wires an in-memory MCP client to a gomcp server pinned to
@@ -225,7 +247,62 @@ func TestRunQueryReadReturnsRows(t *testing.T) {
 	}
 }
 
-func TestRunQueryMutationReturnsApprovalTextNotError(t *testing.T) {
+// TestRunQueryMutationWaitsForApprovalThenRunsIt is the AI write path across
+// the whole pipe: the tool call goes out, stalls in the app's Approval Console
+// where a human answers it, and comes back carrying what the mutation really
+// did. The wait is the feature — an agent that had been handed a token to poll
+// with would simply not come back.
+func TestRunQueryMutationWaitsForApprovalThenRunsIt(t *testing.T) {
+	app := newTestApp(t)
+	app.saveAndConnect("demo", "s3cret")
+	app.driver.Affect("demo", 3)
+
+	cs := connectClient(t, app.dir, "demo")
+
+	results := make(chan *sdkmcp.CallToolResult, 1)
+	go func() {
+		res, err := cs.CallTool(context.Background(), &sdkmcp.CallToolParams{
+			Name: "run_query", Arguments: map[string]any{"sql": "DELETE FROM users"},
+		})
+		if err != nil {
+			t.Errorf("CallTool(run_query): %v", err)
+		}
+		results <- res
+	}()
+
+	if ack := app.svc.ApprovePending(app.waitingInConsole(t).ID); !ack.OK {
+		t.Fatalf("ApprovePending = %+v", ack)
+	}
+
+	var res *sdkmcp.CallToolResult
+	select {
+	case res = <-results:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the tool call never returned after the human approved it")
+	}
+
+	if res.IsError {
+		t.Fatalf("an approved mutation reported a tool error: %s", textContent(t, res))
+	}
+	var got struct {
+		Executed     bool  `json:"executed"`
+		AffectedRows int64 `json:"affected_rows"`
+	}
+	if err := json.Unmarshal([]byte(textContent(t, res)), &got); err != nil {
+		t.Fatalf("decoding content: %v", err)
+	}
+	if !got.Executed || got.AffectedRows != 3 {
+		t.Errorf("payload = %+v, want the 3 rows the database reported to have crossed the pipe", got)
+	}
+	if execs := app.driver.Execs("demo"); len(execs) != 1 || execs[0] != "DELETE FROM users" {
+		t.Errorf("driver.Execs = %v, want the statement once, as submitted", execs)
+	}
+}
+
+// TestRunQueryMutationNobodyApprovesIsNotAToolError: the deadline passed. The
+// agent is told so in the gate's own words rather than being handed a failure
+// it might retry, and nothing ran.
+func TestRunQueryMutationNobodyApprovesIsNotAToolError(t *testing.T) {
 	app := newTestApp(t)
 	app.saveAndConnect("demo", "s3cret")
 
@@ -233,11 +310,10 @@ func TestRunQueryMutationReturnsApprovalTextNotError(t *testing.T) {
 	res := callTool(t, cs, "run_query", map[string]any{"sql": "DELETE FROM users"})
 
 	if res.IsError {
-		t.Fatalf("a withheld mutation must not be a tool error, got: %s", textContent(t, res))
+		t.Fatalf("an unapproved mutation must not be a tool error, got: %s", textContent(t, res))
 	}
-	text := textContent(t, res)
-	if text == "" {
-		t.Error("content is empty, want the gate's own explanation of why the mutation was withheld")
+	if text := textContent(t, res); text == "" {
+		t.Error("content is empty, want the gate's own explanation of why nothing happened")
 	}
 	if len(app.driver.Execs("demo")) != 0 {
 		t.Errorf("driver.Execs = %v, want nothing executed: the mutation must never have run", app.driver.Execs("demo"))

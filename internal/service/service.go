@@ -14,10 +14,11 @@ type AppService struct {
 	profiles *db.ProfileStore
 	registry *db.Registry
 
-	// pending holds the mutations waiting for a decision. It lives here rather
-	// than in an adapter because a confirmation must find the statement the
-	// gate withheld, not one the UI sends back: the ID is the only thing that
-	// crosses the boundary.
+	// pending holds the mutations waiting for a decision, under both policies.
+	// It lives here rather than in an adapter because a decision must find the
+	// statement the gate withheld, not one the UI sends back: the ID is the
+	// only thing that crosses the boundary. It is also where an AI's call
+	// blocks, so the queue and the caller waiting on it stay in one place.
 	pending *guard.Queue
 	audit   guard.AuditLog
 	clock   guard.Clock
@@ -32,15 +33,28 @@ func New(profiles *db.ProfileStore, audit guard.AuditLog) *AppService {
 // NewWithDriver returns an App Service whose Connection Registry opens
 // connections through driver and whose gate decisions are timestamped by clock.
 // It is the seam tests use to substitute a fake database and a clock they
-// control; the shipping binary calls New. A nil clock means time.Now.
+// control; the shipping binary calls New. A nil clock means time.Now, and
+// Approval Console entries expire after guard.ApprovalTimeout.
 func NewWithDriver(profiles *db.ProfileStore, driver db.Driver, audit guard.AuditLog, clock guard.Clock) *AppService {
+	return NewWithApproval(profiles, driver, audit, clock, 0, nil)
+}
+
+// NewWithApproval is NewWithDriver with the Approval Console's deadline opened
+// up: entries auto-reject timeout after they were submitted, measured with
+// timer. A zero timeout means guard.ApprovalTimeout and a nil timer means
+// time.After.
+//
+// It is the seam a test needs to reach the auto-reject path at all — a unit
+// test fires timer itself, and an integration test injects a deadline it can
+// afford to wait out. Nothing in the shipping binary calls it.
+func NewWithApproval(profiles *db.ProfileStore, driver db.Driver, audit guard.AuditLog, clock guard.Clock, timeout time.Duration, timer guard.Timer) *AppService {
 	if clock == nil {
 		clock = time.Now
 	}
 	return &AppService{
 		profiles: profiles,
 		registry: db.NewRegistry(driver, profiles),
-		pending:  guard.NewQueue(clock),
+		pending:  guard.NewQueue(clock, timeout, timer),
 		audit:    audit,
 		clock:    clock,
 	}

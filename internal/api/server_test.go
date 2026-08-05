@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/themethaithian/go-db/internal/api"
 	"github.com/themethaithian/go-db/internal/db"
@@ -53,11 +54,19 @@ type testServer struct {
 
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
+	return newTestServerWithApproval(t, 0)
+}
+
+// newTestServerWithApproval is newTestServer with the Approval Console's
+// deadline shortened, for the one test that lets a request time out rather than
+// answering it.
+func newTestServerWithApproval(t *testing.T, approvalTimeout time.Duration) *testServer {
+	t.Helper()
 
 	driver := dbtest.NewFakeDriver()
-	svc := service.NewWithDriver(
+	svc := service.NewWithApproval(
 		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver,
-		guard.NewJSONLAuditLog(t.TempDir()), nil,
+		guard.NewJSONLAuditLog(t.TempDir()), nil, approvalTimeout, nil,
 	)
 
 	dir := t.TempDir()
@@ -126,6 +135,38 @@ func (ts *testServer) request(method, path, token string, body any, mutate func(
 		ts.t.Fatalf("do request: %v", err)
 	}
 	return resp
+}
+
+// waitingInConsole polls the facade's Approval Console until the in-flight
+// request's mutation shows up there. The request is real and on another
+// goroutine, so the test watches for it rather than being handed a
+// synchronisation point.
+func (ts *testServer) waitingInConsole() guard.Waiting {
+	ts.t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if waiting := ts.svc.ListPendingApprovals(); len(waiting) == 1 {
+			return waiting[0]
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ts.t.Fatal("nothing ever reached the Approval Console; the request is not waiting where it should be")
+	return guard.Waiting{}
+}
+
+// awaited returns the response to the in-flight request, failing rather than
+// hanging if it never arrives.
+func (ts *testServer) awaited(responses <-chan *http.Response) *http.Response {
+	ts.t.Helper()
+
+	select {
+	case resp := <-responses:
+		return resp
+	case <-time.After(30 * time.Second):
+		ts.t.Fatal("/query never answered")
+		return nil
+	}
 }
 
 func TestListenerBindsLoopbackOnly(t *testing.T) {
@@ -291,8 +332,70 @@ func TestQueryReadPassesThroughFacade(t *testing.T) {
 	}
 }
 
-func TestQueryMutationWithAIOriginRequiresApproval(t *testing.T) {
+// TestQueryMutationBlocksUntilTheConsoleDecides is the one thing about this
+// pipe that is not obvious: a POST to /query can stay open for minutes. The
+// response does not arrive until a human answers the Approval Console, and
+// when it does it carries what the mutation really did.
+//
+// Whether the gate should have withheld it, and what it records, is
+// internal/service's claim. What this test states is that the pipe survives the
+// wait — the server's write deadline does not cut it short, and the outcome
+// crosses intact.
+func TestQueryMutationBlocksUntilTheConsoleDecides(t *testing.T) {
 	ts := newTestServer(t)
+	ts.driver.Accept("local", "s3cret")
+	ts.driver.Affect("local", 4)
+	mustSave(t, ts.svc, localProfile("local"), "s3cret")
+	if err := ts.svc.Connect(context.Background(), "local"); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	responses := make(chan *http.Response, 1)
+	go func() {
+		responses <- ts.do(http.MethodPost, "/query", ts.token, map[string]string{
+			"profile": "local",
+			"sql":     "DELETE FROM users",
+			"origin":  "ai",
+		})
+	}()
+
+	// The request is in flight and the facade is holding it: the mutation shows
+	// up in the Approval Console while nothing has come back over the wire.
+	waiting := ts.waitingInConsole()
+	select {
+	case resp := <-responses:
+		resp.Body.Close()
+		t.Fatal("/query answered before anybody decided the mutation")
+	default:
+	}
+
+	if ack := ts.svc.ApprovePending(waiting.ID); !ack.OK {
+		t.Fatalf("ApprovePending = %+v", ack)
+	}
+
+	resp := ts.awaited(responses)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var result service.QueryResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if result.Status != service.QueryExecuted {
+		t.Fatalf("status = %q, want %q (message: %s)", result.Status, service.QueryExecuted, result.Message)
+	}
+	if result.AffectedRows != 4 {
+		t.Errorf("affected_rows = %d, want the 4 the facade reported to have crossed the pipe", result.AffectedRows)
+	}
+}
+
+// TestQueryMutationAnswersWhenTheApprovalTimesOut: nobody decides, the deadline
+// passes, and the request is still answered — with the timed-out outcome rather
+// than a dropped connection.
+func TestQueryMutationAnswersWhenTheApprovalTimesOut(t *testing.T) {
+	ts := newTestServerWithApproval(t, 200*time.Millisecond)
 	ts.driver.Accept("local", "s3cret")
 	mustSave(t, ts.svc, localProfile("local"), "s3cret")
 	if err := ts.svc.Connect(context.Background(), "local"); err != nil {
@@ -313,17 +416,18 @@ func TestQueryMutationWithAIOriginRequiresApproval(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	// This is the contract: the pipe carries the gate's outcome as-is. Why an
-	// AI-originated mutation is withheld is internal/service's claim, not this
-	// package's.
-	if result.Status != service.QueryRequiresApproval {
-		t.Errorf("status = %q, want %q", result.Status, service.QueryRequiresApproval)
+	if result.Status != service.QueryTimedOut {
+		t.Errorf("status = %q, want %q (message: %s)", result.Status, service.QueryTimedOut, result.Message)
+	}
+	if len(ts.driver.Execs("local")) != 0 {
+		t.Errorf("a mutation nobody approved executed %v", ts.driver.Execs("local"))
 	}
 }
 
 func TestQueryDefaultsMissingOriginToAI(t *testing.T) {
 	ts := newTestServer(t)
 	ts.driver.Accept("local", "s3cret")
+	ts.driver.Answer("local", db.ResultSet{Columns: []string{"id"}, Rows: [][]*string{{str("1")}}})
 	mustSave(t, ts.svc, localProfile("local"), "s3cret")
 	if err := ts.svc.Connect(context.Background(), "local"); err != nil {
 		t.Fatalf("Connect: %v", err)
@@ -331,7 +435,7 @@ func TestQueryDefaultsMissingOriginToAI(t *testing.T) {
 
 	resp := ts.do(http.MethodPost, "/query", ts.token, map[string]string{
 		"profile": "local",
-		"sql":     "DELETE FROM users",
+		"sql":     "SELECT id FROM users",
 	})
 	defer resp.Body.Close()
 

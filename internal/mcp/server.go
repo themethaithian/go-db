@@ -66,9 +66,11 @@ func NewServer(configDir, profileName string) *sdkmcp.Server {
 	sdkmcp.AddTool(server, &sdkmcp.Tool{
 		Name: "run_query",
 		Description: fmt.Sprintf(
-			"Run a read query against the go-db Profile %q. A mutating statement is not "+
-				"executed — it is withheld for human approval in the go-db app and this "+
-				"call reports that instead of a result.",
+			"Run a query against the go-db Profile %q. A read answers immediately. A "+
+				"mutating statement is not executed until a human approves it in the go-db "+
+				"app, and this call waits for them — up to about two minutes, after which "+
+				"it is rejected automatically. Expect the delay; the result says whether "+
+				"the statement ran and how many rows it changed.",
 			profileName,
 		),
 	}, func(ctx context.Context, _ *sdkmcp.CallToolRequest, in runQueryInput) (*sdkmcp.CallToolResult, any, error) {
@@ -87,10 +89,12 @@ func NewServer(configDir, profileName string) *sdkmcp.Server {
 // IsError set, so the one-sentence message arrives as a proper MCP response,
 // never a stack trace.
 //
-// Past that, the gate's own verdict decides the shape: "ok" renders the rows
-// as JSON text; "requires_approval" is not an error at all — it is the
-// gate's own sentence explaining that the mutation is withheld, which the
-// agent needs to read, not have swallowed as a failure. Everything else
+// Past that, the gate's own verdict decides the shape. "ok" renders the rows
+// as JSON text and "executed" renders what an approved mutation changed —
+// both are answers to the question that was asked. "rejected", "timed_out"
+// and "cancelled" are not errors either: they are the gate's own sentence
+// about a decision a human made or declined to make, which the agent needs to
+// read rather than have swallowed as a failure. Everything else
 // (not_connected after a failed lazy connect, failed) is a tool error
 // carrying the backend's own message.
 func toolResult(resp queryResponse, err error) (*sdkmcp.CallToolResult, any, error) {
@@ -119,7 +123,21 @@ func toolResult(resp queryResponse, err error) (*sdkmcp.CallToolResult, any, err
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: string(data)}},
 		}, nil, nil
 
-	case "requires_approval":
+	case "executed":
+		payload := struct {
+			Executed     bool   `json:"executed"`
+			AffectedRows int64  `json:"affected_rows"`
+			Message      string `json:"message"`
+		}{Executed: true, AffectedRows: resp.AffectedRows, Message: resp.Message}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, nil, fmt.Errorf("go-db: encoding result: %w", err)
+		}
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: string(data)}},
+		}, nil, nil
+
+	case "rejected", "timed_out", "cancelled":
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: resp.Message}},
 		}, nil, nil

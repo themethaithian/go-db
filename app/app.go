@@ -102,3 +102,14 @@ func (a *App) Classify(sql string) guard.Classification {
 func (a *App) RunQuery(profileName, sql string) service.QueryResult {
 	return a.svc.RunQuery(a.ctx, profileName, sql, guard.OriginHuman)
 }
+
+// ConfirmPending runs the mutation withheld under id — the Inline Confirm's
+// one extra keypress.
+func (a *App) ConfirmPending(id string) service.QueryResult {
+	return a.svc.ConfirmPending(a.ctx, id)
+}
+
+// CancelPending discards the mutation withheld under id without running it.
+func (a *App) CancelPending(id string) service.QueryResult {
+	return a.svc.CancelPending(id)
+}

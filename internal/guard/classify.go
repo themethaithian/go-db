@@ -263,10 +263,19 @@ var reasons = map[string]string{
 // from the type keeps every statement MySQL has — and every one a parser
 // upgrade adds — explicable without a hand-maintained table.
 func statementName(stmt ast.StmtNode) string {
-	name := spaceCamel(strings.TrimSuffix(shortTypeName(stmt), "Stmt"))
-	if reason, ok := reasons[name]; ok {
+	if reason, ok := reasons[spaceCamel(strings.TrimSuffix(shortTypeName(stmt), "Stmt"))]; ok {
 		return reason
 	}
+	return keywordName(stmt)
+}
+
+// keywordName is statementName without the explanations: just the keywords,
+// for sentences that supply their own reason. "SET statement" reads correctly
+// after "no preview is available for a"; the classifier's fuller "SET
+// statement, and a session variable can change how later statements behave"
+// does not.
+func keywordName(stmt ast.StmtNode) string {
+	name := spaceCamel(strings.TrimSuffix(shortTypeName(stmt), "Stmt"))
 	if name == "" {
 		return "statement that is not provably read-only"
 	}

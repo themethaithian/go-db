@@ -17,6 +17,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/themethaithian/go-db/internal/db"
 	"github.com/themethaithian/go-db/internal/db/dbtest"
+	"github.com/themethaithian/go-db/internal/guard"
 	"github.com/themethaithian/go-db/internal/service"
 )
 
@@ -214,7 +215,7 @@ func closedPort(t *testing.T) int {
 func newMySQLFacade(t *testing.T) *service.AppService {
 	t.Helper()
 
-	svc := service.New(db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()))
+	svc := service.New(db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), guard.NewJSONLAuditLog(t.TempDir()))
 	t.Cleanup(func() {
 		if err := svc.Close(); err != nil {
 			t.Errorf("closing the Connection Registry: %v", err)

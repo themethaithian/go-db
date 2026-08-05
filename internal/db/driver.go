@@ -61,11 +61,13 @@ type Driver interface {
 
 // Conn is one open connection to a database, held by the Connection Registry.
 //
-// The interface is deliberately minimal, and asymmetric on purpose: it can read
-// and it cannot write. There is no Exec here and there will not be one until
-// the Approval Gate has something approved to hand it, so a mutation that
-// escapes the classifier has nowhere to go. Nothing here exposes the underlying
-// pool.
+// The interface is deliberately minimal, and asymmetric on purpose. ReadQuery
+// runs inside a read-only transaction and cannot write whatever it is given;
+// Exec can write anything and is guarded by nothing, which is why the two are
+// separate methods rather than one that decides. Exec exists because the
+// Approval Gate now has approved mutations to hand it, and it is the only way
+// into this package that writes: a statement reaches it only after a human
+// confirmed it by ID. Nothing here exposes the underlying pool.
 type Conn interface {
 	// Ping verifies the connection is still usable.
 	Ping(ctx context.Context) error
@@ -89,6 +91,23 @@ type Conn interface {
 	// Implementations must not interpolate anything into sql; it is executed
 	// exactly as given.
 	ReadQuery(ctx context.Context, sql string) (ResultSet, error)
+
+	// Exec runs one approved statement and reports how many rows it changed.
+	//
+	// There is no transaction and no second layer here: this is the method the
+	// Approval Gate calls once a human has confirmed a specific mutation, and
+	// wrapping it in the read-only transaction that guards ReadQuery would
+	// refuse the very statement that was approved. The safety is upstream —
+	// nothing calls Exec that a human has not decided by ID — and it is the
+	// reason Exec is not reachable from any adapter except through the gate.
+	//
+	// A statement that changes no rows returns 0, which is a real answer and
+	// not an error. DDL reports 0 too: MySQL counts rows, and CREATE TABLE
+	// changes none.
+	//
+	// Implementations must not interpolate anything into sql; it is executed
+	// exactly as given.
+	Exec(ctx context.Context, sql string) (affected int64, err error)
 
 	// Close releases the connection. It is safe to call once; the Registry
 	// owns the lifecycle and calls it exactly once per Conn.

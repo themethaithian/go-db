@@ -1,20 +1,38 @@
-// Package guard implements the Approval Gate, the single pipeline that classifies every query and applies Origin-specific policy to mutating ones.
+// Package guard implements the Approval Gate: the single pipeline that
+// classifies every query and applies the Origin's policy to mutating ones.
 //
-// The Approval Gate has two layers:
-// 1. Query classifier using TiDB parser (pure Go, MySQL-compatible) to classify statements as read-only or mutating.
-//    Anything not provably read-only enters the gate.
-// 2. Backstop: reads execute inside START TRANSACTION READ ONLY; DB-rejected writes reroute into the gate.
+// # Classification
 //
-// Impact Preview is an advisory estimate of what a mutating query would do—affected-row count and a sample of affected rows.
-// It is computed by rewriting the mutation into a COUNT + LIMIT-ed sample SELECT (never executing the write).
-// Some statements (e.g. DDL) have no preview and say so explicitly.
+// Two layers, because neither is enough alone (ADR 0002). Classify parses the
+// statement with the TiDB parser and proves it read-only against a closed
+// allowlist; anything else is a mutation. Reads then execute inside a read-only
+// transaction, and a write the database refuses there comes back through
+// Backstopped as a mutation after all. The layers do not overlap everywhere:
+// MySQL commits implicitly before DDL, so for CREATE, DROP, ALTER and TRUNCATE
+// the classifier is the only layer there is.
 //
-// For human-originated (editor) mutating queries: Inline Confirm policy shows a confirmation in place in the editor,
-// carrying the Impact Preview, with one extra keypress to proceed.
+// # Impact Preview
 //
-// For AI-originated (MCP) mutating queries: Approval Console policy queues the query in a visible list,
-// where the human approves or rejects it, or it times out (auto-reject).
+// PlanPreview rewrites a mutation into the reads that describe it — a COUNT and
+// a small sample over the statement's own FROM and WHERE (ADR 0003). The
+// mutation is never executed to produce its own preview, so nothing holds row
+// locks while a human deliberates. The result is a Preview, which either
+// carries an advisory count and sample or says outright that there is none and
+// why: DDL, multi-table mutations and unparseable input have no preview, and
+// that refusal is a first-class answer rather than an empty one.
 //
-// The AuditLog port records every query attempt and outcome.
-// This package exports a narrow API; internal machinery (classifier, rewriter, queue logic) is hidden.
+// # Decisions
+//
+// A withheld mutation waits in a Queue as a Pending, identified by an opaque
+// ID. It can be taken exactly once, which is what makes one confirmation
+// execute one statement. Policy differs by Origin: a human's mutation raises an
+// Inline Confirm and a queue entry; an AI's waits in the Approval Console.
+//
+// Every decision is written through the AuditLog port as a Record, with the
+// preview's advisory count beside the affected-row count the database really
+// reported. NewJSONLAuditLog is the append-only JSONL adapter (ADR 0004); Clock
+// is the port that makes a Record's timestamps testable.
+//
+// Nothing in this package opens a connection or runs a query. It plans, judges,
+// and remembers; the App Service executes.
 package guard

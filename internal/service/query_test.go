@@ -98,10 +98,12 @@ func TestRunQueryReportsTruncation(t *testing.T) {
 	}
 }
 
-// TestRunQueryRefusesMutations is the gate refusing to execute an unapproved
-// mutation. The policy that follows — Inline Confirm or the Approval Console —
-// arrives with the Approval Gate slice; refusing to run starts here.
-func TestRunQueryRefusesMutations(t *testing.T) {
+// TestRunQueryWithholdsMutations is the gate refusing to execute an unapproved
+// mutation. What happens next is the Origin's policy — Inline Confirm here,
+// covered in approval_test.go — and the claim this test makes is the one that
+// holds for every Origin: the statement the human typed does not reach the
+// database, as a read or as a write, until it has been decided.
+func TestRunQueryWithholdsMutations(t *testing.T) {
 	for _, sql := range []string{
 		"DELETE FROM users WHERE id = 1",
 		"UPDATE users SET name = 'a'",
@@ -117,8 +119,8 @@ func TestRunQueryRefusesMutations(t *testing.T) {
 
 			got := svc.RunQuery(context.Background(), "local", sql, guard.OriginHuman)
 
-			if got.Status != service.QueryRequiresApproval {
-				t.Errorf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresApproval, got.Message)
+			if got.Status != service.QueryRequiresConfirmation {
+				t.Errorf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
 			}
 			if got.Classification.Kind != guard.Mutation {
 				t.Errorf("classification = %+v, want a mutation", got.Classification)
@@ -133,9 +135,16 @@ func TestRunQueryRefusesMutations(t *testing.T) {
 				t.Errorf("a withheld query returned data: columns=%v rows=%v", got.Columns, got.Rows)
 			}
 
-			// The point of the test: nothing was sent to the database.
-			if queries := driver.Queries("local"); len(queries) != 0 {
-				t.Errorf("the database was asked %v, want nothing: a mutation must not execute before approval", queries)
+			// The point of the test: the statement itself went nowhere. Reads
+			// the Impact Preview asked for are a different matter — they are
+			// rewrites, and internal/guard proves they cannot write.
+			if execs := driver.Execs("local"); len(execs) != 0 {
+				t.Errorf("the database executed %v, want nothing: a mutation must not run before it is confirmed", execs)
+			}
+			for _, asked := range driver.Queries("local") {
+				if asked == sql {
+					t.Errorf("the mutation was sent to the database as a read: %q", asked)
+				}
 			}
 		})
 	}

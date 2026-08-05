@@ -258,7 +258,9 @@ func TestIntegrationBackstopDoesNotCoverDDL(t *testing.T) {
 }
 
 // TestIntegrationRunQueryWithholdsAMutation is the same claim one layer up: an
-// UPDATE submitted to the facade never reaches the database at all.
+// UPDATE submitted to the facade is described but never performed. The Impact
+// Preview does reach the database — as reads — and the table must be untouched
+// afterwards all the same.
 func TestIntegrationRunQueryWithholdsAMutation(t *testing.T) {
 	host, port := requireMySQL(t)
 	pool := adminPool(t, host, port)
@@ -280,11 +282,14 @@ func TestIntegrationRunQueryWithholdsAMutation(t *testing.T) {
 		t.Run(sql, func(t *testing.T) {
 			got := svc.RunQuery(ctx, "local", sql, guard.OriginHuman)
 
-			if got.Status != service.QueryRequiresApproval {
-				t.Errorf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresApproval, got.Message)
+			if got.Status != service.QueryRequiresConfirmation {
+				t.Errorf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
 			}
 			if got.Classification.Kind != guard.Mutation {
 				t.Errorf("classification = %+v, want a mutation", got.Classification)
+			}
+			if got.PendingID == "" {
+				t.Error("no pending ID; the human has nothing to confirm or cancel")
 			}
 		})
 	}

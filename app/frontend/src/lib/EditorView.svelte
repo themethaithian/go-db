@@ -4,9 +4,11 @@
   // (sql text, classification, run result, the selected Profile) lives here;
   // connectedProfiles is owned and refreshed by App.svelte and passed down,
   // since it also drives the status bar.
+  import { untrack } from "svelte";
   import SqlEditor from "./SqlEditor.svelte";
   import ResultsTable from "./ResultsTable.svelte";
-  import { Classify, RunQuery } from "../../wailsjs/go/app/App";
+  import InlineConfirm from "./InlineConfirm.svelte";
+  import { Classify, RunQuery, CancelPending } from "../../wailsjs/go/app/App";
   import type { guard, service } from "../../wailsjs/go/models";
 
   let {
@@ -45,10 +47,14 @@
     return () => clearTimeout(timer);
   });
 
-  let canRun = $derived(profileName !== null && sql.trim() !== "" && !running);
+  // A confirm panel open counts as busy too: resolving it (confirm or cancel)
+  // is the only way forward, so a second Run cannot spawn a second pending
+  // behind the human's back.
+  let confirmOpen = $derived(result?.status === "requires_confirmation");
+  let canRun = $derived(profileName !== null && sql.trim() !== "" && !running && !confirmOpen);
 
   async function run() {
-    if (profileName === null || sql.trim() === "" || running) return;
+    if (profileName === null || sql.trim() === "" || running || confirmOpen) return;
     running = true;
     try {
       result = await RunQuery(profileName, sql);
@@ -59,6 +65,29 @@
 
   function handleSqlChange(next: string) {
     sql = next;
+  }
+
+  // A withheld mutation is the statement the gate previewed, by ID — not
+  // whatever text is in the editor a moment later. If the human edits the SQL
+  // or switches Profile while its Inline Confirm is open, that statement no
+  // longer reflects their intent, so it is cancelled rather than left to be
+  // confirmed stale. The pending's own ID is read with untrack so this effect
+  // only fires on sql/profileName changing, not on result changing (which it
+  // itself causes).
+  $effect(() => {
+    sql;
+    profileName;
+    const pending = untrack(() => result);
+    if (pending?.status === "requires_confirmation" && pending.pending_id) {
+      CancelPending(pending.pending_id);
+      untrack(() => {
+        if (result === pending) result = null;
+      });
+    }
+  });
+
+  function handlePendingResolved(next: service.QueryResult) {
+    result = next;
   }
 </script>
 
@@ -132,6 +161,19 @@
         rows={(result.rows ?? []) as (string | null)[][]}
         truncated={result.truncated}
       />
+    {:else if result.status === "requires_confirmation" && result.pending_id && result.preview}
+      <InlineConfirm
+        reason={result.classification.reason}
+        preview={result.preview}
+        pendingId={result.pending_id}
+        onResolved={handlePendingResolved}
+      />
+    {:else if result.status === "executed"}
+      <div class="rounded-panel border border-success/40 bg-success/10 p-4 text-sm text-success">
+        <p>Executed — {result.affected_rows === 1 ? "1 row" : `${result.affected_rows} rows`} affected.</p>
+      </div>
+    {:else if result.status === "cancelled"}
+      <p class="text-sm text-text-muted">Cancelled — nothing was executed.</p>
     {:else if result.status === "requires_approval"}
       <div class="rounded-panel border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
         <p>{result.message}</p>

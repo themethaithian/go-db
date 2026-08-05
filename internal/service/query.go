@@ -18,12 +18,24 @@ const (
 	// QueryOK reports that the query was a read and it ran; Columns and Rows
 	// hold its answer.
 	QueryOK QueryStatus = "ok"
-	// QueryRequiresApproval reports that the query did not run because it is
-	// not provably read-only. Classification says why. The policy that
-	// follows — Inline Confirm for a human, the Approval Console for an AI —
-	// belongs to the Approval Gate; withholding the query is what happens
-	// here.
+	// QueryRequiresConfirmation reports that the query did not run because it
+	// is not provably read-only, and that it is waiting on one confirmation
+	// from the human who submitted it — Inline Confirm. PendingID names it and
+	// Preview says what it would do; ConfirmPending runs it, CancelPending
+	// discards it.
+	QueryRequiresConfirmation QueryStatus = "requires_confirmation"
+	// QueryRequiresApproval reports that an AI-originated query did not run
+	// because it is not provably read-only. It waits in the Approval Console,
+	// which is a later slice; until then it is simply withheld.
 	QueryRequiresApproval QueryStatus = "requires_approval"
+	// QueryExecuted reports that a confirmed mutation ran. AffectedRows is
+	// what the database really changed.
+	QueryExecuted QueryStatus = "executed"
+	// QueryCancelled reports that a withheld mutation was discarded unrun.
+	QueryCancelled QueryStatus = "cancelled"
+	// QueryUnknownPending reports that no mutation is waiting under the given
+	// ID — it was already confirmed, already cancelled, or never existed.
+	QueryUnknownPending QueryStatus = "unknown_pending"
 	// QueryNotConnected reports that the Profile has no open connection, so
 	// there was nowhere to run the query.
 	QueryNotConnected QueryStatus = "not_connected"
@@ -51,6 +63,24 @@ type QueryResult struct {
 	Columns   []string    `json:"columns,omitempty"`
 	Rows      [][]*string `json:"rows,omitempty"`
 	Truncated bool        `json:"truncated"`
+
+	// PendingID names the withheld mutation when Status is
+	// QueryRequiresConfirmation, and is what ConfirmPending and CancelPending
+	// are given. It is opaque: it identifies a statement the gate is holding,
+	// so the statement that runs is the one that was previewed and not
+	// whatever text came back from the UI.
+	PendingID string `json:"pending_id,omitempty"`
+
+	// Preview is the Impact Preview shown with a confirmation, and echoed back
+	// with the outcome so the human can see the estimate beside the result. It
+	// is nil for a query that was never withheld; when it is present it always
+	// says something, including that there is no preview.
+	Preview *guard.Preview `json:"preview,omitempty"`
+
+	// AffectedRows is what the mutation really changed, set when Status is
+	// QueryExecuted. It is the number the audit log records beside the
+	// preview's advisory estimate.
+	AffectedRows int64 `json:"affected_rows"`
 }
 
 // OK reports whether the query ran and returned rows.
@@ -78,23 +108,20 @@ func (s *AppService) Classify(sql string) guard.Classification {
 // It returns no error: every outcome, including failure, is a result the UI
 // renders directly.
 //
-// origin is recorded and returned with the result. The gate applies a different
-// policy to each Origin — Inline Confirm and the Approval Console — which
-// arrives with the Approval Gate slice; the seam takes the Origin now so it
-// does not have to change then.
+// origin is recorded and returned with the result, and decides the policy the
+// gate applies: a human's mutation raises an Inline Confirm here and now, an
+// AI's waits in the Approval Console.
 func (s *AppService) RunQuery(ctx context.Context, profileName, sql string, origin guard.Origin) QueryResult {
 	classification := guard.Classify(sql)
 	result := QueryResult{Classification: classification, Origin: origin}
 
 	if !classification.IsRead() {
-		return withheld(result)
+		return s.withhold(ctx, profileName, sql, result)
 	}
 
 	conn, err := s.registry.Conn(profileName)
 	if err != nil {
-		result.Status = QueryNotConnected
-		result.Message = fmt.Sprintf("Profile %q is not connected: connect it and run the query again.", profileName)
-		return result
+		return notConnected(result, profileName)
 	}
 
 	rows, err := conn.ReadQuery(ctx, sql)
@@ -102,9 +129,10 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, sql string, orig
 	case errors.Is(err, db.ErrWriteAttempt):
 		// The classifier was wrong and the database caught it. The query is a
 		// mutation from here on, and takes the same route as one that had been
-		// recognised upfront.
+		// recognised upfront — including the confirmation and the preview,
+		// which will usually have none for a statement nobody can rewrite.
 		result.Classification = guard.Backstopped()
-		return withheld(result)
+		return s.withhold(ctx, profileName, sql, result)
 
 	case err != nil:
 		result.Status = QueryFailed
@@ -118,14 +146,66 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, sql string, orig
 	return result
 }
 
-// withheld completes the result for a query the gate did not let run. It is one
-// function so a mutation caught by the classifier and one caught by the
-// database are indistinguishable downstream — which is the point of the
-// backstop.
-func withheld(result QueryResult) QueryResult {
-	result.Status = QueryRequiresApproval
-	result.Message = fmt.Sprintf("This query was not run: %s. It needs approval first.", result.Classification.Reason)
+// withhold applies the Origin's policy to a mutation. It is one function so a
+// mutation caught by the classifier and one caught by the database take exactly
+// the same route — which is the point of the backstop.
+func (s *AppService) withhold(ctx context.Context, profileName, sql string, result QueryResult) QueryResult {
+	if result.Origin != guard.OriginHuman {
+		// The Approval Console is a later slice. Until it exists, an
+		// AI-originated mutation is withheld and nothing else happens on its
+		// behalf: no preview, no queue entry, nothing to confirm.
+		result.Status = QueryRequiresApproval
+		result.Message = fmt.Sprintf("This query was not run: %s. It needs approval first.", result.Classification.Reason)
+		return result
+	}
+
+	// Inline Confirm needs a connection twice over — to compute the preview
+	// now and to run the statement on confirmation — so a Profile that is not
+	// connected is reported rather than queued against nothing.
+	conn, err := s.registry.Conn(profileName)
+	if err != nil {
+		return notConnected(result, profileName)
+	}
+
+	preview := s.previewImpact(ctx, conn, sql)
+	pending := s.pending.Add(guard.Pending{
+		Profile:        profileName,
+		SQL:            sql,
+		Origin:         result.Origin,
+		Classification: result.Classification,
+		Preview:        preview,
+	})
+
+	result.Status = QueryRequiresConfirmation
+	result.PendingID = pending.ID
+	result.Preview = &pending.Preview
+	result.Message = confirmationMessage(result.Classification, preview)
 	return result
+}
+
+func notConnected(result QueryResult, profileName string) QueryResult {
+	result.Status = QueryNotConnected
+	result.Message = fmt.Sprintf("Profile %q is not connected: connect it and run the query again.", profileName)
+	return result
+}
+
+// confirmationMessage is the line beside an Inline Confirm. It says three
+// things in the order the human needs them: that nothing has run, why it was
+// stopped, and what it would do — or that nobody can say what it would do.
+func confirmationMessage(classification guard.Classification, preview guard.Preview) string {
+	switch {
+	case preview.Available:
+		return fmt.Sprintf("This query was not run: %s. It would change about %s. Confirm to run it.",
+			classification.Reason, rowCount(preview.Count))
+
+	case preview.Reason == classification.Reason:
+		// The gate and the rewriter stopped on the same thing — unparseable
+		// input, more than one statement — and saying it twice helps nobody.
+		return fmt.Sprintf("This query was not run: %s. There is no Impact Preview either. Confirm to run it.",
+			classification.Reason)
+	}
+	return fmt.Sprintf("This query was not run: %s. There is no Impact Preview: %s. Confirm to run it.",
+		classification.Reason, preview.Reason)
 }
 
 // summarise is the line shown beside a result table.

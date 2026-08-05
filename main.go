@@ -6,9 +6,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/themethaithian/go-db/app"
 	"github.com/themethaithian/go-db/internal/db"
+	"github.com/themethaithian/go-db/internal/guard"
 	"github.com/themethaithian/go-db/internal/service"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -20,13 +22,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	profileDir, err := db.DefaultProfileDir()
+	// One directory holds everything go-db keeps on disk: the Profiles and the
+	// Approval Gate's audit log. Passwords are not among them — those live in
+	// the OS keychain and never touch disk.
+	configDir, err := db.DefaultProfileDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "go-db:", err)
 		os.Exit(1)
 	}
 
-	svc := service.NewWithDriver(db.NewProfileStore(profileDir, db.NewOSKeychain()), db.NewMySQLDriver())
+	svc := service.NewWithDriver(
+		db.NewProfileStore(configDir, db.NewOSKeychain()),
+		db.NewMySQLDriver(),
+		guard.NewJSONLAuditLog(configDir),
+		time.Now,
+	)
 	shell := app.New(svc)
 
 	err = wails.Run(&options.App{

@@ -10,6 +10,7 @@ import (
 
 	"github.com/themethaithian/go-db/internal/db"
 	"github.com/themethaithian/go-db/internal/db/dbtest"
+	"github.com/themethaithian/go-db/internal/guard"
 	"github.com/themethaithian/go-db/internal/service"
 )
 
@@ -19,7 +20,7 @@ import (
 // keychain.
 func newFacade(t *testing.T, dir string, keychain db.Keychain) *service.AppService {
 	t.Helper()
-	return service.New(db.NewProfileStore(dir, keychain))
+	return service.New(db.NewProfileStore(dir, keychain), guard.NewJSONLAuditLog(dir))
 }
 
 // configDirBytes returns every byte stored anywhere under dir, concatenated.

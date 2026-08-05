@@ -8,6 +8,7 @@ import (
 
 	"github.com/themethaithian/go-db/internal/db"
 	"github.com/themethaithian/go-db/internal/db/dbtest"
+	"github.com/themethaithian/go-db/internal/guard"
 	"github.com/themethaithian/go-db/internal/service"
 )
 
@@ -15,7 +16,12 @@ import (
 // connections through driver rather than a real MySQL server.
 func newConnectedFacade(t *testing.T, keychain db.Keychain, driver db.Driver) *service.AppService {
 	t.Helper()
-	return service.NewWithDriver(db.NewProfileStore(t.TempDir(), keychain), driver)
+	// A real audit log in a throwaway directory, and the real clock: tests that
+	// care about either build their facade with newGate instead.
+	return service.NewWithDriver(
+		db.NewProfileStore(t.TempDir(), keychain), driver,
+		guard.NewJSONLAuditLog(t.TempDir()), nil,
+	)
 }
 
 // localProfile is the Profile the fake driver's scripted outcomes are keyed by.

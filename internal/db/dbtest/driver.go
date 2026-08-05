@@ -18,9 +18,15 @@ import (
 // Fail overrides either with an arbitrary error, for the outcomes that are
 // neither authentication nor reachability.
 //
-// Reads are scripted per Profile with Answer, RejectWrites, and FailQuery;
-// Queries reports what was actually asked, which is how a test proves a
-// mutation never reached the database.
+// Reads are scripted per Profile with Answer, AnswerQuery, RejectWrites, and
+// FailQuery; Queries reports what was actually asked, which is how a test
+// proves a mutation never reached the database.
+//
+// Writes are scripted with Affect and FailExec, and Execs reports the
+// statements that were executed. The two lists are kept apart on purpose: a
+// test asserting that a mutation was previewed but not run is asking whether
+// its statement is in Execs, and an Exec that never happened must not be
+// hidden among the preview's reads.
 //
 // It tracks the connections it hands out so a test can assert lifecycle:
 // OpenProfiles reports what is open right now, Opens how many were ever
@@ -31,8 +37,12 @@ type FakeDriver struct {
 	failures  map[string]error        // forced outcomes, checked first
 	open      map[string]int          // currently open connections, by Profile
 	answers   map[string]db.ResultSet // scripted read results, by Profile
+	byQuery   map[string]db.ResultSet // scripted read results, by Profile and statement
 	refusals  map[string]error        // scripted read failures, by Profile
 	queries   map[string][]string     // statements ReadQuery was given
+	affected  map[string]int64        // scripted affected-row counts, by Profile
+	execFails map[string]error        // scripted write failures, by Profile
+	execs     map[string][]string     // statements Exec was given
 	opens     int
 }
 
@@ -43,8 +53,12 @@ func NewFakeDriver() *FakeDriver {
 		failures:  make(map[string]error),
 		open:      make(map[string]int),
 		answers:   make(map[string]db.ResultSet),
+		byQuery:   make(map[string]db.ResultSet),
 		refusals:  make(map[string]error),
 		queries:   make(map[string][]string),
+		affected:  make(map[string]int64),
+		execFails: make(map[string]error),
+		execs:     make(map[string][]string),
 	}
 }
 
@@ -57,6 +71,61 @@ func (d *FakeDriver) Answer(profileName string, result db.ResultSet) {
 
 	d.answers[profileName] = result
 	delete(d.refusals, profileName)
+}
+
+// AnswerQuery makes reads of exactly sql on profileName return result. It takes
+// precedence over Answer, which is how a test scripts an Impact Preview: the
+// count query and the sample query are two different statements and must give
+// two different answers.
+func (d *FakeDriver) AnswerQuery(profileName, sql string, result db.ResultSet) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.byQuery[profileName+"\x00"+sql] = result
+	delete(d.refusals, profileName)
+}
+
+// Affect makes every Exec on profileName report that it changed rows.
+func (d *FakeDriver) Affect(profileName string, rows int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.affected[profileName] = rows
+	delete(d.execFails, profileName)
+}
+
+// FailExec makes every Exec on profileName fail with err.
+func (d *FakeDriver) FailExec(profileName string, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.execFails[profileName] = err
+	delete(d.affected, profileName)
+}
+
+// Execs returns the statements Exec was given for profileName, in order. An
+// empty result is the evidence that nothing was written.
+func (d *FakeDriver) Execs(profileName string) []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return append([]string(nil), d.execs[profileName]...)
+}
+
+// exec performs one write for profileName, recording it first. A Profile with
+// no scripted outcome still succeeds, reporting no rows changed: a mutation
+// reaching a database that was never told what to say is a test bug about
+// Execs, and it should be read there rather than as a failed statement.
+func (d *FakeDriver) exec(profileName, sql string) (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.execs[profileName] = append(d.execs[profileName], sql)
+
+	if err, failed := d.execFails[profileName]; failed {
+		return 0, err
+	}
+	return d.affected[profileName], nil
 }
 
 // RejectWrites makes profileName's server behave like the Approval Gate's
@@ -95,6 +164,9 @@ func (d *FakeDriver) readQuery(profileName, sql string) (db.ResultSet, error) {
 
 	if err, refused := d.refusals[profileName]; refused {
 		return db.ResultSet{}, err
+	}
+	if answer, scripted := d.byQuery[profileName+"\x00"+sql]; scripted {
+		return answer, nil
 	}
 	if answer, scripted := d.answers[profileName]; scripted {
 		return answer, nil
@@ -207,6 +279,20 @@ func (c *fakeConn) ReadQuery(ctx context.Context, sql string) (db.ResultSet, err
 		return db.ResultSet{}, err
 	}
 	return c.driver.readQuery(c.profile, sql)
+}
+
+func (c *fakeConn) Exec(ctx context.Context, sql string) (int64, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return 0, errors.New("dbtest: exec on a closed connection")
+	}
+	c.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.driver.exec(c.profile, sql)
 }
 
 func (c *fakeConn) Close() error {

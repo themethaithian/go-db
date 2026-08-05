@@ -137,6 +137,26 @@ func (c *mysqlConn) ReadQuery(ctx context.Context, sql string) (ResultSet, error
 	return result, nil
 }
 
+// Exec runs an approved mutation directly on the pool — no transaction, so
+// nothing holds locks while anyone deliberates, and DDL is not preceded by an
+// implicit commit of something else.
+//
+// It reports the rows the server says it changed. A driver that cannot say is
+// treated as nothing changed rather than as a failure: the statement ran, and
+// claiming otherwise would be worse than an imprecise count.
+func (c *mysqlConn) Exec(ctx context.Context, sql string) (int64, error) {
+	result, err := c.pool.ExecContext(ctx, sql)
+	if err != nil {
+		return 0, classify(err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return affected, nil
+}
+
 // txReadOnly is the transaction reads run in. Default isolation is deliberate:
 // the read-only promise is what matters here, not a stricter snapshot.
 var txReadOnly = sql.TxOptions{ReadOnly: true}

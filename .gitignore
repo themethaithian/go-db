@@ -1,0 +1,41 @@
+# Go
+*.o
+*.a
+*.so
+*.exe
+*.exe~
+*.dll
+*.so.*
+*.dylib
+*.dSYM/
+*.dSYM
+
+# Wails build output (the build/ assets dir itself — icons, Info.plist,
+# installer templates — is committed; only the compiled binaries are not)
+/build/bin/
+app/frontend/wailsjs/
+app/frontend/package.json.md5
+
+# Vite / Node
+app/frontend/node_modules/
+app/frontend/dist/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.env.local
+.env.*.local
+
+# Misc
+.DS_Store
+*.pem

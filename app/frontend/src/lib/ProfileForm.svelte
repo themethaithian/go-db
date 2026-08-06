@@ -104,174 +104,210 @@
     }
     onDelete(name);
   }
+
+  // Shared control recipes, so every field and button in the form is the
+  // same object. Token-backed utilities only — see app.css.
+  const fieldClass =
+    "h-9 w-full rounded-control border border-border bg-surface px-2.5 text-base text-text transition-colors placeholder:text-text-subtle hover:border-border-strong focus:border-accent";
+  const lockedFieldClass =
+    "disabled:cursor-not-allowed disabled:border-border disabled:bg-surface-raised disabled:text-text-muted disabled:hover:border-border";
+  const labelClass = "flex flex-col gap-1.5 text-xs font-medium text-text-muted";
+  const buttonBase =
+    "inline-flex h-8 shrink-0 items-center justify-center rounded-control px-3 text-base font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50";
+  const primaryButton = `${buttonBase} bg-accent text-white hover:bg-accent-hover`;
+  const secondaryButton = `${buttonBase} border border-border bg-surface-raised text-text hover:border-border-strong hover:bg-surface-overlay`;
 </script>
 
-<form class="flex w-full max-w-md flex-col gap-4" onsubmit={handleSubmit}>
-  <h2 class="text-lg text-text">{isEditing ? "Edit profile" : "New profile"}</h2>
-
-  {#if error}
-    <p class="rounded-control border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
-      {error}
-    </p>
-  {/if}
-
-  <label class="flex flex-col gap-1 text-sm text-text-muted">
-    Name
-    <input
-      class="rounded-control border border-border bg-surface px-3 py-2 text-text disabled:opacity-50"
-      bind:value={name}
-      disabled={isEditing}
-      required
-    />
-  </label>
-
-  <label class="flex flex-col gap-1 text-sm text-text-muted">
-    Host
-    <input
-      class="rounded-control border border-border bg-surface px-3 py-2 text-text"
-      bind:value={host}
-      required
-    />
-  </label>
-
-  <label class="flex flex-col gap-1 text-sm text-text-muted">
-    Port
-    <input
-      type="number"
-      class="rounded-control border border-border bg-surface px-3 py-2 text-text"
-      bind:value={port}
-      required
-    />
-  </label>
-
-  <label class="flex flex-col gap-1 text-sm text-text-muted">
-    User
-    <input
-      class="rounded-control border border-border bg-surface px-3 py-2 text-text"
-      bind:value={user}
-      required
-    />
-  </label>
-
-  <label class="flex flex-col gap-1 text-sm text-text-muted">
-    Database
-    <input class="rounded-control border border-border bg-surface px-3 py-2 text-text" bind:value={database} />
-  </label>
-
-  <label class="flex flex-col gap-1 text-sm text-text-muted">
-    Password
-    <input
-      type="password"
-      class="rounded-control border border-border bg-surface px-3 py-2 text-text"
-      bind:value={password}
-      placeholder={isEditing ? "leave blank to keep current" : "optional"}
-    />
-  </label>
-
-  <div class="flex flex-col gap-3 rounded-control border border-border bg-surface-raised p-3">
-    <label class="flex items-center gap-2 text-sm text-text">
-      <input
-        type="checkbox"
-        class="h-4 w-4 rounded-sm border-border bg-surface accent-accent"
-        bind:checked={sshEnabled}
-      />
-      Connect through an SSH tunnel
-    </label>
-
-    {#if sshEnabled}
-      <div class="flex flex-col gap-3 border-l border-border pl-4">
-        <label class="flex flex-col gap-1 text-sm text-text-muted">
-          Bastion host
-          <input
-            class="rounded-control border border-border bg-surface px-3 py-2 text-text"
-            bind:value={sshHost}
-            required
-          />
-        </label>
-
-        <label class="flex flex-col gap-1 text-sm text-text-muted">
-          Port
-          <input
-            type="number"
-            class="rounded-control border border-border bg-surface px-3 py-2 text-text"
-            value={sshPortInput}
-            oninput={(e) => (sshPortInput = e.currentTarget.value)}
-            placeholder="22"
-          />
-        </label>
-
-        <label class="flex flex-col gap-1 text-sm text-text-muted">
-          User
-          <input
-            class="rounded-control border border-border bg-surface px-3 py-2 text-text"
-            bind:value={sshUser}
-            required
-          />
-        </label>
-
-        <label class="flex flex-col gap-1 text-sm text-text-muted">
-          Key file
-          <input
-            class="rounded-control border border-border bg-surface px-3 py-2 text-text"
-            bind:value={sshKeyFile}
-            placeholder="optional"
-          />
-          <span class="text-xs text-text-muted">
-            Optional — leave empty to use your SSH agent or default keys (~/.ssh). Passphrase-protected keys must be
-            held by the agent.
-          </span>
-        </label>
-      </div>
+<form class="rounded-panel border border-border bg-surface-panel shadow-panel" onsubmit={handleSubmit}>
+  <header class="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+    <div class="min-w-0">
+      <h2 class="text-lg font-semibold text-text">{isEditing ? "Edit profile" : "New profile"}</h2>
+      <p class="mt-0.5 truncate text-sm text-text-muted">
+        {isEditing ? "How go-db reaches this database." : "Describe how to reach a database."}
+      </p>
+    </div>
+    {#if isEditing && isConnected}
+      <span
+        class="flex shrink-0 items-center gap-1.5 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-xs font-medium text-success"
+      >
+        <span class="h-1.5 w-1.5 rounded-full bg-success"></span>
+        Connected
+      </span>
     {/if}
+  </header>
+
+  <div class="flex flex-col gap-5 px-5 py-5">
+    {#if error}
+      <p class="rounded-control border border-danger/40 bg-danger/10 px-3 py-2 text-base text-danger">
+        {error}
+      </p>
+    {/if}
+
+    <div class="grid grid-cols-4 gap-x-3 gap-y-4">
+      <label class="{labelClass} col-span-4">
+        <span class="flex items-center justify-between">
+          <span>Name</span>
+          {#if isEditing}
+            <span class="font-normal text-text-subtle">locked</span>
+          {/if}
+        </span>
+        <input class="{fieldClass} {lockedFieldClass}" bind:value={name} disabled={isEditing} required />
+      </label>
+
+      <label class="{labelClass} col-span-3">
+        Host
+        <input class={fieldClass} bind:value={host} required />
+      </label>
+
+      <label class="{labelClass} col-span-1">
+        Port
+        <input type="number" class={fieldClass} bind:value={port} required />
+      </label>
+
+      <label class="{labelClass} col-span-2">
+        User
+        <input class={fieldClass} bind:value={user} required />
+      </label>
+
+      <label class="{labelClass} col-span-2">
+        Database
+        <input class={fieldClass} bind:value={database} placeholder="optional" />
+      </label>
+
+      <label class="{labelClass} col-span-4">
+        Password
+        <input
+          type="password"
+          class={fieldClass}
+          bind:value={password}
+          placeholder={isEditing ? "leave blank to keep the stored password" : "optional"}
+        />
+      </label>
+    </div>
+
+    <div class="rounded-control border border-border bg-surface">
+      <label class="flex cursor-pointer items-center gap-2.5 px-3 py-2.5 text-base text-text">
+        <span class="relative flex h-4 w-4 shrink-0 items-center justify-center">
+          <input
+            type="checkbox"
+            class="h-4 w-4 cursor-pointer appearance-none rounded-sm border border-border bg-surface-raised transition-colors checked:border-accent checked:bg-accent hover:border-border-strong"
+            bind:checked={sshEnabled}
+          />
+          {#if sshEnabled}
+            <svg
+              class="pointer-events-none absolute h-2.5 w-2.5 text-white"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M2 6.25 4.75 9 10 3.25" />
+            </svg>
+          {/if}
+        </span>
+        <span>Connect through an SSH tunnel</span>
+      </label>
+
+      {#if sshEnabled}
+        <div class="grid grid-cols-4 gap-x-3 gap-y-4 border-t border-border px-3 py-4">
+          <label class="{labelClass} col-span-3">
+            Bastion host
+            <input class={fieldClass} bind:value={sshHost} required />
+          </label>
+
+          <label class="{labelClass} col-span-1">
+            Port
+            <input
+              type="number"
+              class={fieldClass}
+              value={sshPortInput}
+              oninput={(e) => (sshPortInput = e.currentTarget.value)}
+              placeholder="22"
+            />
+          </label>
+
+          <label class="{labelClass} col-span-2">
+            User
+            <input class={fieldClass} bind:value={sshUser} required />
+          </label>
+
+          <label class="{labelClass} col-span-2">
+            Key file
+            <input class={fieldClass} bind:value={sshKeyFile} placeholder="optional" />
+          </label>
+
+          <p class="col-span-4 -mt-1 text-xs leading-relaxed text-text-subtle">
+            Leave the key file empty to use your SSH agent or default keys (~/.ssh). Passphrase-protected keys must
+            be held by the agent.
+          </p>
+        </div>
+      {/if}
+    </div>
   </div>
 
-  <div class="flex flex-wrap items-center gap-3 pt-2">
-    <button
-      type="submit"
-      class="rounded-control bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/90"
-    >
-      Save
-    </button>
+  <footer class="flex items-center gap-2 border-t border-border px-5 py-3.5">
+    <button type="submit" class={primaryButton}>Save</button>
 
     {#if isEditing}
-      <button
-        type="button"
-        class="rounded-control border border-border px-4 py-2 text-sm font-medium text-text transition-colors hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-50"
-        onclick={onTest}
-        disabled={testing}
-      >
+      <button type="button" class={secondaryButton} onclick={onTest} disabled={testing}>
         {testing ? "Testing…" : "Test connection"}
       </button>
 
+      <span class="mx-1 h-5 w-px shrink-0 bg-border"></span>
+
       <button
         type="button"
-        class="rounded-control border px-4 py-2 text-sm font-medium transition-colors {isConnected
-          ? 'border-border text-text hover:bg-surface-overlay'
-          : 'border-accent text-accent hover:bg-accent/10'}"
+        class="{buttonBase} border {isConnected
+          ? 'border-border bg-surface-raised text-text hover:border-border-strong hover:bg-surface-overlay'
+          : 'border-accent/40 bg-accent/10 text-accent hover:border-accent/60 hover:bg-accent/15'}"
         onclick={isConnected ? onDisconnect : onConnect}
       >
         {isConnected ? "Disconnect" : "Connect"}
       </button>
 
+      <span class="flex-1"></span>
+
       <button
         type="button"
-        class="rounded-control border border-danger px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger/10"
+        class="{buttonBase} border {confirmingDelete
+          ? 'border-danger bg-danger/15 text-danger'
+          : 'border-border text-text-muted hover:border-danger/50 hover:bg-danger/10 hover:text-danger'}"
         onclick={handleDeleteClick}
       >
         {confirmingDelete ? "Really delete?" : "Delete"}
       </button>
     {:else}
-      <span class="text-xs text-text-muted">Save first to test</span>
+      <span class="text-sm text-text-subtle">Save the profile before testing or connecting.</span>
     {/if}
-  </div>
+  </footer>
 
   {#if outcome}
     <p
-      class="rounded-control border px-3 py-2 text-sm {outcome.kind === 'success'
-        ? 'border-success/40 bg-success/10 text-success'
-        : 'border-danger/40 bg-danger/10 text-danger'}"
+      class="flex items-start gap-2 rounded-b-panel border-t px-5 py-3 text-base {outcome.kind === 'success'
+        ? 'border-success/30 bg-success/10 text-success'
+        : 'border-danger/30 bg-danger/10 text-danger'}"
     >
-      {outcome.message}
+      <svg
+        class="mt-0.5 h-3.5 w-3.5 shrink-0"
+        viewBox="0 0 14 14"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="7" cy="7" r="5.5" />
+        {#if outcome.kind === "success"}
+          <path d="M4.75 7.25 6.25 8.75 9.25 5.5" />
+        {:else}
+          <path d="M7 4.25v3.5M7 9.75h.01" />
+        {/if}
+      </svg>
+      <span>{outcome.message}</span>
     </p>
   {/if}
 </form>

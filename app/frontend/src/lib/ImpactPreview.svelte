@@ -19,30 +19,34 @@
 
 {#if preview.available}
   <div class="flex flex-col gap-2">
-    <p class="text-sm text-text">
-      <span class="font-medium">≈ {preview.count === 1 ? "1 row" : `${preview.count} rows`} affected</span>
+    <p class="text-base">
+      <span class="font-semibold text-text">
+        ≈ {preview.count === 1 ? "1 row" : `${preview.count} rows`} affected
+      </span>
       <span class="text-text-muted"> — advisory estimate; data may change before this runs.</span>
     </p>
 
     {#if preview.columns && preview.columns.length > 0 && sampleRows.length > 0}
       <div class="overflow-auto rounded-control border border-border">
-        <table class="w-full min-w-max border-collapse font-mono text-xs">
-          <thead class="bg-surface-raised">
+        <table class="w-full min-w-max border-collapse text-left">
+          <thead>
             <tr>
               {#each preview.columns as column (column)}
-                <th class="border-b border-border px-2 py-1 text-left font-medium text-text-muted whitespace-nowrap">
+                <th
+                  class="border-b border-border bg-surface-raised px-2.5 py-1.5 text-xs font-medium tracking-wide text-text-muted uppercase whitespace-nowrap"
+                >
                   {column}
                 </th>
               {/each}
             </tr>
           </thead>
-          <tbody>
+          <tbody class="font-mono text-sm">
             {#each sampleRows as row, i (i)}
-              <tr class="odd:bg-surface even:bg-surface-raised/40">
+              <tr class="border-b border-border/60 last:border-b-0">
                 {#each row as cell, j (j)}
-                  <td class="border-b border-border px-2 py-1 whitespace-nowrap text-text">
+                  <td class="px-2.5 py-1.5 text-text tabular-nums whitespace-nowrap">
                     {#if cell === null}
-                      <span class="italic text-text-muted">NULL</span>
+                      <span class="text-text-subtle italic">NULL</span>
                     {:else}
                       {cellText(cell)}
                     {/if}
@@ -53,10 +57,11 @@
           </tbody>
         </table>
       </div>
+      <p class="text-xs text-text-subtle">A sample of the rows this would touch.</p>
     {/if}
   </div>
 {:else}
-  <div class="rounded-control border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+  <div class="rounded-control border border-danger/40 bg-danger/10 px-3 py-2 text-base text-danger">
     <span class="font-semibold">No preview available</span> — {preview.reason}
   </div>
 {/if}

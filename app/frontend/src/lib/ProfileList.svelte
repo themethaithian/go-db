@@ -28,48 +28,62 @@
   }
 </script>
 
-<aside class="flex w-64 shrink-0 flex-col border-r border-border bg-surface-raised">
-  <div class="flex items-center justify-between border-b border-border px-4 py-3">
-    <h2 class="text-sm font-medium text-text">Profiles</h2>
+<aside class="flex w-60 shrink-0 flex-col border-r border-border bg-surface-panel">
+  <div class="flex h-11 shrink-0 items-center justify-between border-b border-border pr-2 pl-4">
+    <h2 class="text-xs font-medium tracking-wide text-text-muted uppercase">Profiles</h2>
     <button
       type="button"
-      class="flex h-6 w-6 items-center justify-center rounded-control text-text-muted transition-colors hover:bg-surface-overlay hover:text-text"
+      class="flex h-7 w-7 items-center justify-center rounded-control border border-transparent text-text-muted transition-colors hover:border-border hover:bg-surface-overlay hover:text-text"
       onclick={onCreate}
+      title="New profile"
       aria-label="New profile"
     >
-      +
+      <svg
+        class="h-4 w-4"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        aria-hidden="true"
+      >
+        <path d="M8 3.5v9M3.5 8h9" />
+      </svg>
     </button>
   </div>
 
-  <nav class="flex-1 overflow-y-auto">
+  <nav class="flex-1 overflow-y-auto py-2">
     {#if profiles.length === 0}
-      <p class="px-4 py-3 text-xs text-text-muted">No profiles yet</p>
+      <p class="px-4 py-2 text-sm text-text-subtle">No profiles yet</p>
     {:else}
       {#each profiles as profile (profile.Name)}
         <button
           type="button"
-          class="flex w-full flex-col items-start gap-0.5 border-l-2 px-4 py-2 text-left transition-colors {profile.Name ===
+          class="flex w-full flex-col items-start gap-1 border-l-2 py-2.5 pr-3 pl-3.5 text-left transition-colors {profile.Name ===
           selectedName
             ? 'border-accent bg-surface-overlay'
-            : 'border-transparent hover:bg-surface-overlay/50'}"
+            : 'border-transparent hover:bg-surface-raised'}"
           onclick={() => onSelect(profile.Name)}
         >
-          <span class="flex items-center gap-1.5 text-sm text-text">
-            {#if isConnected(profile)}
-              <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-success" aria-label="Connected"></span>
-            {/if}
-            {profile.Name}
-          </span>
-          <span class="flex items-center gap-1.5 text-xs text-text-muted">
-            {subtitle(profile)}
+          <span class="flex w-full items-center gap-2">
+            <span
+              class="h-1.5 w-1.5 shrink-0 rounded-full {isConnected(profile)
+                ? 'bg-success'
+                : 'bg-text-subtle'}"
+              aria-label={isConnected(profile) ? "Connected" : "Not connected"}
+            ></span>
+            <span class="truncate text-base font-medium text-text">{profile.Name}</span>
             {#if profile.SSH}
               <span
-                class="rounded-full border border-border bg-surface-overlay px-1.5 py-0 text-xs font-medium tracking-wide text-text-muted uppercase"
+                class="ml-auto shrink-0 rounded-full border border-border bg-surface-raised px-1.5 text-xs font-medium tracking-wide text-text-muted uppercase"
                 title="Reached through an SSH tunnel"
               >
                 ssh
               </span>
             {/if}
+          </span>
+          <span class="truncate pl-3.5 font-mono text-xs text-text-subtle">
+            {subtitle(profile)}
           </span>
         </button>
       {/each}

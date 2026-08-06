@@ -33,8 +33,8 @@
 
   let statusText = $derived(
     connectedProfiles.length === 0
-      ? "go-db · not connected"
-      : `go-db · connected: ${connectedProfiles.join(", ")}`,
+      ? "Not connected"
+      : `Connected · ${connectedProfiles.join(", ")}`,
   );
 
   async function refreshConnections() {
@@ -72,44 +72,62 @@
 </script>
 
 <div class="flex h-screen w-screen flex-col bg-surface font-sans text-base text-text">
-  <header class="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-surface-raised px-3">
-    <span class="text-sm font-semibold text-text">go-db</span>
-    <div class="flex gap-0.5 rounded-control border border-border bg-surface p-0.5 text-xs">
+  <header class="flex h-11 shrink-0 items-center gap-5 border-b border-border bg-surface-panel px-3">
+    <span class="flex items-center gap-2 pl-1">
+      <svg
+        class="h-4 w-4 text-accent"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <ellipse cx="8" cy="3.75" rx="5.25" ry="2.25" />
+        <path d="M2.75 3.75v8.5c0 1.24 2.35 2.25 5.25 2.25s5.25-1.01 5.25-2.25v-8.5" />
+        <path d="M2.75 8c0 1.24 2.35 2.25 5.25 2.25s5.25-1.01 5.25-2.25" />
+      </svg>
+      <span class="text-md font-semibold tracking-tight text-text">go-db</span>
+    </span>
+
+    <nav class="flex items-center gap-0.5 rounded-control border border-border bg-surface p-0.5 text-sm">
       <button
         type="button"
-        class="rounded-control px-3 py-1 transition-colors {view === 'connections'
+        class="rounded-control px-3 py-1 font-medium transition-colors {view === 'connections'
           ? 'bg-accent text-white'
-          : 'text-text-muted hover:text-text'}"
+          : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
         onclick={() => switchView("connections")}
       >
         Connections
       </button>
       <button
         type="button"
-        class="rounded-control px-3 py-1 transition-colors {view === 'editor'
+        class="rounded-control px-3 py-1 font-medium transition-colors {view === 'editor'
           ? 'bg-accent text-white'
-          : 'text-text-muted hover:text-text'}"
+          : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
         onclick={() => switchView("editor")}
       >
         Editor
       </button>
       <button
         type="button"
-        class="flex items-center gap-1.5 rounded-control px-3 py-1 transition-colors {view === 'approvals'
+        class="flex items-center gap-1.5 rounded-control px-3 py-1 font-medium transition-colors {view ===
+        'approvals'
           ? 'bg-accent text-white'
-          : 'text-text-muted hover:text-text'}"
+          : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
         onclick={() => switchView("approvals")}
       >
         Approvals
         {#if pendingApprovals.length > 0}
           <span
-            class="flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-xs leading-none font-semibold text-white"
+            class="flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-xs leading-none font-semibold tabular-nums text-white"
           >
             {pendingApprovals.length}
           </span>
         {/if}
       </button>
-    </div>
+    </nav>
   </header>
 
   <div class="flex flex-1 overflow-hidden">
@@ -123,9 +141,14 @@
   </div>
 
   <footer
-    class="flex h-8 shrink-0 items-center justify-between border-t border-border bg-surface-raised px-3 text-xs text-text-muted"
+    class="flex h-7 shrink-0 items-center justify-between border-t border-border bg-surface-panel px-3 text-xs text-text-muted"
   >
-    <span class="flex items-center gap-1">
+    <span class="flex items-center gap-2">
+      <span
+        class="h-1.5 w-1.5 shrink-0 rounded-full {connectedProfiles.length > 0
+          ? 'bg-success'
+          : 'bg-text-subtle'}"
+      ></span>
       <span>{statusText}</span>
       {#if pendingApprovals.length > 0}
         <span class="text-warning">
@@ -134,10 +157,10 @@
       {/if}
     </span>
     <span
-      class={memoryMB !== null && memoryMB > MEMORY_BUDGET_MB ? "text-warning" : ""}
+      class="tabular-nums {memoryMB !== null && memoryMB > MEMORY_BUDGET_MB ? 'text-warning' : ''}"
       title={memoryMB !== null && memoryMB > MEMORY_BUDGET_MB
         ? `over the ${MEMORY_BUDGET_MB} MB idle budget`
-        : undefined}
+        : `idle budget ${MEMORY_BUDGET_MB} MB`}
     >
       {memoryMB === null ? "— MB" : `${Math.round(memoryMB)} MB`}
     </span>

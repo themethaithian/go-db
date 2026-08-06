@@ -36,28 +36,33 @@
   }
 </script>
 
-<div class="flex h-full flex-col gap-2">
+<div class="flex min-h-0 flex-1 flex-col">
   {#if totalRows === 0}
-    <p class="text-sm text-text-muted">0 rows.</p>
+    <div class="m-auto flex flex-col items-center gap-1 px-6 py-8 text-center">
+      <p class="text-base font-medium text-text">0 rows</p>
+      <p class="text-sm text-text-muted">The query ran fine — it just matched nothing.</p>
+    </div>
   {:else}
-    <div class="flex-1 overflow-auto rounded-panel border border-border">
-      <table class="w-full min-w-max border-collapse font-mono text-sm">
-        <thead class="sticky top-0 z-10 bg-surface-raised">
+    <div class="min-h-0 flex-1 overflow-auto">
+      <table class="w-full min-w-max border-collapse text-left">
+        <thead class="sticky top-0 z-10">
           <tr>
             {#each columns as column (column)}
-              <th class="border-b border-border px-3 py-2 text-left font-medium text-text-muted whitespace-nowrap">
+              <th
+                class="border-b border-border bg-surface-raised px-3 py-2 text-xs font-medium tracking-wide text-text-muted uppercase whitespace-nowrap"
+              >
                 {column}
               </th>
             {/each}
           </tr>
         </thead>
-        <tbody>
+        <tbody class="font-mono text-base">
           {#each pageRows as row, i (i)}
-            <tr class="odd:bg-surface even:bg-surface-raised/40 hover:bg-surface-overlay">
+            <tr class="transition-colors hover:bg-surface-overlay">
               {#each row as cell, j (j)}
-                <td class="border-b border-border px-3 py-1.5 whitespace-nowrap text-text">
+                <td class="border-b border-border/60 px-3 py-2 text-text tabular-nums whitespace-nowrap">
                   {#if cell === null}
-                    <span class="italic text-text-muted">NULL</span>
+                    <span class="text-text-subtle italic">NULL</span>
                   {:else}
                     {cell}
                   {/if}
@@ -69,17 +74,28 @@
       </table>
     </div>
 
-    <div class="flex shrink-0 items-center justify-between text-xs text-text-muted">
-      <span>
-        rows {rangeStart}–{rangeEnd} of {totalRows}
+    <div
+      class="flex shrink-0 items-center justify-between gap-3 border-t border-border px-3 py-2 text-xs text-text-muted"
+    >
+      <span class="flex items-center gap-2">
+        <span class="tabular-nums">
+          Rows {rangeStart}–{rangeEnd} of {totalRows}
+        </span>
         {#if truncated}
-          · showing first {totalRows} rows (truncated)
+          <span
+            class="rounded-full border border-warning/40 bg-warning/10 px-1.5 py-px font-medium text-warning"
+            title="The backend capped this result set"
+          >
+            truncated
+          </span>
         {/if}
       </span>
-      <div class="flex gap-2">
+
+      <div class="flex items-center gap-2">
+        <span class="tabular-nums">Page {page + 1} of {totalPages}</span>
         <button
           type="button"
-          class="rounded-control border border-border px-2 py-1 transition-colors hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-40"
+          class="inline-flex h-6 items-center rounded-control border border-border bg-surface-raised px-2 font-medium text-text transition-colors hover:border-border-strong hover:bg-surface-overlay disabled:cursor-not-allowed disabled:border-border disabled:bg-transparent disabled:text-text-subtle"
           onclick={prev}
           disabled={page === 0}
         >
@@ -87,7 +103,7 @@
         </button>
         <button
           type="button"
-          class="rounded-control border border-border px-2 py-1 transition-colors hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-40"
+          class="inline-flex h-6 items-center rounded-control border border-border bg-surface-raised px-2 font-medium text-text transition-colors hover:border-border-strong hover:bg-surface-overlay disabled:cursor-not-allowed disabled:border-border disabled:bg-transparent disabled:text-text-subtle"
           onclick={next}
           disabled={page >= totalPages - 1}
         >

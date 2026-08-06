@@ -69,31 +69,51 @@
 
 </script>
 
-<div class="flex h-full flex-col gap-3 overflow-auto rounded-panel border border-warning/40 bg-warning/10 p-4">
-  <div>
-    <p class="text-sm font-semibold text-warning">This query will modify data</p>
-    <p class="mt-0.5 text-xs text-warning/80">{reason}</p>
+<section
+  class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel border border-warning/40 bg-surface-panel shadow-panel"
+>
+  <header class="flex shrink-0 items-start gap-2.5 border-b border-warning/25 bg-warning/10 px-3 py-2.5">
+    <svg
+      class="mt-px h-4 w-4 shrink-0 text-warning"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 2.75 14.25 13.5H1.75L8 2.75Z" />
+      <path d="M8 6.75v3M8 11.75h.01" />
+    </svg>
+    <div class="min-w-0">
+      <p class="text-base font-semibold text-warning">This query will modify data</p>
+      <p class="mt-0.5 text-sm text-text-muted">{reason}</p>
+    </div>
+  </header>
+
+  <div class="min-h-0 flex-1 overflow-auto p-3">
+    <ImpactPreview {preview} />
   </div>
 
-  <ImpactPreview {preview} />
-
-  <div class="mt-auto flex shrink-0 items-center justify-end gap-2 pt-1">
+  <footer class="flex shrink-0 items-center justify-end gap-2 border-t border-border px-3 py-2.5">
+    <span class="mr-auto text-xs text-text-subtle">Esc cancels · ⏎ confirms</span>
     <button
       type="button"
-      class="rounded-control border border-border px-4 py-1.5 text-sm font-medium text-text transition-colors hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-50"
+      class="inline-flex h-8 items-center rounded-control border border-border bg-surface-raised px-3 text-base font-medium text-text transition-colors hover:border-border-strong hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-50"
       disabled={busy}
       onclick={cancel}
     >
-      {inFlight === "cancel" ? "Running…" : "Cancel"}
+      {inFlight === "cancel" ? "Cancelling…" : "Cancel"}
     </button>
     <button
       type="button"
       bind:this={confirmButton}
-      class="rounded-control bg-danger px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-danger/90 disabled:cursor-not-allowed disabled:opacity-50"
+      class="inline-flex h-8 items-center rounded-control bg-danger px-3 text-base font-medium text-white transition-colors hover:bg-danger/85 disabled:cursor-not-allowed disabled:opacity-50"
       disabled={busy}
       onclick={confirm}
     >
       {inFlight === "confirm" ? "Running…" : "Confirm & run"}
     </button>
-  </div>
-</div>
+  </footer>
+</section>

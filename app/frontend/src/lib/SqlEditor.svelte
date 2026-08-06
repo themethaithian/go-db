@@ -14,7 +14,9 @@
     drawSelection,
   } from "@codemirror/view";
   import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+  import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
   import { sql, MySQL } from "@codemirror/lang-sql";
+  import { tags } from "@lezer/highlight";
 
   let {
     value,
@@ -35,27 +37,38 @@
     {
       "&": {
         height: "100%",
-        backgroundColor: "var(--color-surface)",
+        backgroundColor: "var(--color-surface-panel)",
         color: "var(--color-text)",
-        fontSize: "var(--text-base)",
+        fontSize: "var(--text-md)",
       },
       ".cm-content": {
         fontFamily: "var(--font-mono)",
         caretColor: "var(--color-text)",
+        padding: "0.5rem 0",
+      },
+      ".cm-line": {
+        padding: "0 0.75rem",
       },
       ".cm-scroller": {
         fontFamily: "var(--font-mono)",
+        lineHeight: "1.6",
       },
       ".cm-gutters": {
-        backgroundColor: "var(--color-surface-raised)",
-        color: "var(--color-text-muted)",
-        border: "none",
+        backgroundColor: "var(--color-surface-panel)",
+        color: "var(--color-text-subtle)",
+        borderRight: "1px solid var(--color-border)",
+        paddingRight: "0.125rem",
+      },
+      ".cm-lineNumbers .cm-gutterElement": {
+        padding: "0 0.5rem 0 0.75rem",
+        minWidth: "2rem",
       },
       ".cm-activeLine": {
-        backgroundColor: "var(--color-surface-overlay)",
+        backgroundColor: "var(--color-surface-raised)",
       },
       ".cm-activeLineGutter": {
-        backgroundColor: "var(--color-surface-overlay)",
+        backgroundColor: "var(--color-surface-raised)",
+        color: "var(--color-text-muted)",
       },
       "&.cm-focused": {
         outline: "none",
@@ -71,6 +84,18 @@
     { dark: true },
   );
 
+  // Syntax colors, also from the tokens: keywords, strings, numbers and
+  // comments are the only distinctions SQL actually needs to scan quickly.
+  const highlight = HighlightStyle.define([
+    { tag: tags.keyword, color: "var(--color-syntax-keyword)", fontWeight: "500" },
+    { tag: [tags.string, tags.special(tags.string)], color: "var(--color-syntax-string)" },
+    { tag: [tags.number, tags.bool, tags.null], color: "var(--color-syntax-number)" },
+    { tag: [tags.typeName, tags.atom], color: "var(--color-syntax-type)" },
+    { tag: tags.comment, color: "var(--color-text-subtle)", fontStyle: "italic" },
+    { tag: [tags.operator, tags.punctuation, tags.separator], color: "var(--color-text-muted)" },
+    { tag: [tags.variableName, tags.propertyName], color: "var(--color-text)" },
+  ]);
+
   onMount(() => {
     view = new EditorView({
       state: EditorState.create({
@@ -82,6 +107,7 @@
           drawSelection(),
           history(),
           sql({ dialect: MySQL }),
+          syntaxHighlighting(highlight),
           theme,
           keymap.of([
             { key: "Mod-Enter", run: () => (onRun(), true) },

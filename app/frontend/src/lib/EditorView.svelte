@@ -91,98 +91,154 @@
   }
 </script>
 
-<div class="flex flex-1 flex-col overflow-hidden">
-  <div class="flex shrink-0 items-center gap-3 border-b border-border bg-surface-raised px-4 py-2">
+<div class="flex flex-1 flex-col overflow-hidden bg-surface">
+  <div class="flex h-11 shrink-0 items-center gap-3 border-b border-border bg-surface-panel px-3">
     {#if connectedProfiles.length === 0}
-      <span class="text-sm text-text-muted">
+      <span class="text-base text-text-muted">
         No profile connected —
-        <button type="button" class="text-accent underline hover:no-underline" onclick={onGoToConnections}>
+        <button
+          type="button"
+          class="font-medium text-accent underline-offset-2 hover:underline"
+          onclick={onGoToConnections}
+        >
           connect one
         </button>
         to run queries.
       </span>
     {:else}
-      <select
-        class="rounded-control border border-border bg-surface px-2 py-1.5 text-sm text-text"
-        bind:value={profileName}
-      >
-        <option value={null} disabled selected={profileName === null}>Select profile…</option>
-        {#each connectedProfiles as name (name)}
-          <option value={name}>{name}</option>
-        {/each}
-      </select>
+      <label class="flex items-center gap-2 text-xs font-medium text-text-muted">
+        Profile
+        <select
+          class="h-8 rounded-control border border-border bg-surface-raised px-2 text-base font-normal text-text transition-colors hover:border-border-strong"
+          bind:value={profileName}
+        >
+          <option value={null} disabled selected={profileName === null}>Select profile…</option>
+          {#each connectedProfiles as name (name)}
+            <option value={name}>{name}</option>
+          {/each}
+        </select>
+      </label>
     {/if}
 
     {#if classification}
-      {#if classification.kind === "read"}
-        <span
-          class="rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-xs font-medium text-success"
-        >
-          READ
-        </span>
-      {:else}
-        <span class="flex items-center gap-1.5">
+      <span class="flex min-w-0 items-center gap-2">
+        {#if classification.kind === "read"}
+          <span
+            class="shrink-0 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-xs font-semibold tracking-wide text-success"
+          >
+            READ
+          </span>
+        {:else}
           <span
             title={classification.reason}
-            class="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs font-medium text-warning"
+            class="shrink-0 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs font-semibold tracking-wide text-warning"
           >
             MUTATION
           </span>
-          <span class="text-xs text-text-muted" title={classification.reason}>
+          <span class="truncate text-sm text-text-subtle" title={classification.reason}>
             {classification.reason}
           </span>
-        </span>
-      {/if}
+        {/if}
+      </span>
     {/if}
 
     <div class="flex-1"></div>
 
-    <span class="text-xs text-text-muted">⌘⏎</span>
     <button
       type="button"
-      class="rounded-control bg-accent px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+      class="inline-flex h-8 shrink-0 items-center gap-2 rounded-control bg-accent pr-2.5 pl-3.5 text-base font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-surface-raised disabled:text-text-subtle"
       disabled={!canRun}
       onclick={run}
     >
       {running ? "Running…" : "Run"}
+      <kbd class="rounded-sm bg-white/15 px-1 py-px font-sans text-xs text-white/80">⌘⏎</kbd>
     </button>
   </div>
 
-  <div class="h-56 shrink-0 border-b border-border">
-    <SqlEditor value={sql} onChange={handleSqlChange} onRun={run} />
-  </div>
+  <div class="flex min-h-0 flex-1 flex-col gap-3 p-3">
+    <section
+      class="flex min-h-0 shrink-0 basis-2/5 flex-col overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel"
+    >
+      <div
+        class="flex h-8 shrink-0 items-center justify-between border-b border-border px-3 text-xs font-medium tracking-wide text-text-subtle uppercase"
+      >
+        <span>Query</span>
+      </div>
+      <div class="min-h-0 flex-1">
+        <SqlEditor value={sql} onChange={handleSqlChange} onRun={run} />
+      </div>
+    </section>
 
-  <div class="flex-1 overflow-hidden p-4">
-    {#if result === null}
-      <p class="text-sm text-text-muted">Run a query to see results here.</p>
-    {:else if result.status === "ok"}
-      <ResultsTable
-        columns={result.columns ?? []}
-        rows={(result.rows ?? []) as (string | null)[][]}
-        truncated={result.truncated}
-      />
-    {:else if result.status === "requires_confirmation" && result.pending_id && result.preview}
+    {#if result !== null && result.status === "requires_confirmation" && result.pending_id && result.preview}
       <InlineConfirm
         reason={result.classification.reason}
         preview={result.preview}
         pendingId={result.pending_id}
         onResolved={handlePendingResolved}
       />
-    {:else if result.status === "executed"}
-      <div class="rounded-panel border border-success/40 bg-success/10 p-4 text-sm text-success">
-        <p>Executed — {result.affected_rows === 1 ? "1 row" : `${result.affected_rows} rows`} affected.</p>
-      </div>
-    {:else if result.status === "cancelled"}
-      <p class="text-sm text-text-muted">Cancelled — nothing was executed.</p>
     {:else}
-      <!-- Covers failed, not_connected, unknown_pending, and rejected/timed_out
-           (Approval Console outcomes) — the last two can't reach a human-origin
-           editor session in practice, since only the editor's own Inline
-           Confirm ever runs here, but rendering them as danger notices costs
-           nothing and keeps this branch honest if that ever changes. -->
-      <div class="rounded-panel border border-danger/40 bg-danger/10 p-4 text-sm text-danger">
-        <p>{result.message}</p>
-      </div>
+      <section
+        class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel"
+      >
+        <div
+          class="flex h-8 shrink-0 items-center justify-between border-b border-border px-3 text-xs font-medium tracking-wide text-text-subtle uppercase"
+        >
+          <span>Results</span>
+        </div>
+
+        {#if result === null}
+          <div class="m-auto flex max-w-xs flex-col items-center gap-2 px-6 py-8 text-center">
+            <svg
+              class="h-5 w-5 text-text-subtle"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="2.75" y="3.75" width="14.5" height="12.5" rx="1.75" />
+              <path d="M2.75 8h14.5M7.75 8v8.25" />
+            </svg>
+            <p class="text-base font-medium text-text">No results yet</p>
+            <p class="text-sm text-text-muted">Write a query above and press ⌘⏎ to run it.</p>
+          </div>
+        {:else if result.status === "ok"}
+          <ResultsTable
+            columns={result.columns ?? []}
+            rows={(result.rows ?? []) as (string | null)[][]}
+            truncated={result.truncated}
+          />
+        {:else if result.status === "executed"}
+          <div class="p-3">
+            <p
+              class="rounded-control border border-success/40 bg-success/10 px-3 py-2 text-base text-success"
+            >
+              Executed — {result.affected_rows === 1 ? "1 row" : `${result.affected_rows} rows`} affected.
+            </p>
+          </div>
+        {:else if result.status === "cancelled"}
+          <div class="p-3">
+            <p class="rounded-control border border-border bg-surface px-3 py-2 text-base text-text-muted">
+              Cancelled — nothing was executed.
+            </p>
+          </div>
+        {:else}
+          <!-- Covers failed, not_connected, unknown_pending, and rejected/timed_out
+               (Approval Console outcomes) — the last two can't reach a human-origin
+               editor session in practice, since only the editor's own Inline
+               Confirm ever runs here, but rendering them as danger notices costs
+               nothing and keeps this branch honest if that ever changes. -->
+          <div class="p-3">
+            <p
+              class="rounded-control border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-base text-danger"
+            >
+              {result.message}
+            </p>
+          </div>
+        {/if}
+      </section>
     {/if}
   </div>
 </div>

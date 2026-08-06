@@ -66,29 +66,33 @@
   }
 </script>
 
-<div class="flex flex-col gap-3 rounded-panel border border-warning/40 bg-surface-raised p-4">
-  <div class="flex flex-wrap items-center gap-2">
-    <span class="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
+<article class="overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel">
+  <header class="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
+    <span
+      class="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
+    >
       {entry.profile}
     </span>
     <span
-      class="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs font-medium text-warning"
+      class="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs font-semibold tracking-wide text-warning"
       title={entry.classification.reason}
     >
       MUTATION
     </span>
-    <span class="text-xs text-text-muted">{entry.classification.reason}</span>
+    <span class="truncate text-sm text-text-subtle">{entry.classification.reason}</span>
     <div class="flex-1"></div>
-    <span class="text-xs font-medium text-warning">{countdownText}</span>
+    <span class="shrink-0 text-xs font-medium text-warning tabular-nums">{countdownText}</span>
+  </header>
+
+  <div class="flex flex-col gap-3 px-4 py-4">
+    <pre
+      class="max-h-40 overflow-auto rounded-control border border-border bg-surface px-3 py-2 font-mono text-base whitespace-pre-wrap break-words text-text">{entry.sql}</pre>
+
+    <ImpactPreview preview={entry.preview} />
   </div>
 
-  <pre
-    class="max-h-40 overflow-auto rounded-control border border-border bg-surface p-2 font-mono text-xs whitespace-pre-wrap break-words text-text">{entry.sql}</pre>
-
-  <ImpactPreview preview={entry.preview} />
-
-  <div class="flex items-center justify-between gap-3">
-    <span class="text-xs text-text-muted">Requested {requestedAtText()}</span>
+  <footer class="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
+    <span class="text-xs text-text-subtle">Requested {requestedAtText()}</span>
 
     <div class="flex items-center gap-2">
       {#if ackMessage}
@@ -96,7 +100,7 @@
       {/if}
       <button
         type="button"
-        class="rounded-control border border-border px-4 py-1.5 text-sm font-medium text-text transition-colors hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-50"
+        class="inline-flex h-8 items-center rounded-control border border-border bg-surface-raised px-3 text-base font-medium text-text transition-colors hover:border-border-strong hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-50"
         disabled={busy}
         onclick={() => decide("reject")}
       >
@@ -104,12 +108,12 @@
       </button>
       <button
         type="button"
-        class="rounded-control bg-danger px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-danger/90 disabled:cursor-not-allowed disabled:opacity-50"
+        class="inline-flex h-8 items-center rounded-control bg-danger px-3 text-base font-medium text-white transition-colors hover:bg-danger/85 disabled:cursor-not-allowed disabled:opacity-50"
         disabled={busy}
         onclick={() => decide("approve")}
       >
         {inFlight === "approve" ? "Approving…" : "Approve"}
       </button>
     </div>
-  </div>
-</div>
+  </footer>
+</article>

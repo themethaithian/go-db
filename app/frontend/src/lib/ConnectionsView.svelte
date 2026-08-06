@@ -131,23 +131,50 @@
 
 <ProfileList {profiles} {selectedName} {connectedProfiles} onSelect={handleSelect} onCreate={handleCreate} />
 
-<main class="flex flex-1 items-center justify-center overflow-y-auto p-6">
+<main class="flex flex-1 overflow-y-auto bg-surface">
   {#if mode === "empty"}
-    <span class="text-lg text-text-muted">
-      {profiles.length === 0 ? "No profiles yet — create one" : "Select a profile, or create one"}
-    </span>
+    <div class="m-auto flex max-w-xs flex-col items-center gap-3 px-6 py-10 text-center">
+      <span
+        class="flex h-11 w-11 items-center justify-center rounded-panel border border-border bg-surface-panel text-text-subtle"
+      >
+        <svg
+          class="h-5 w-5"
+          viewBox="0 0 20 20"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.4"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <ellipse cx="10" cy="4.75" rx="6.25" ry="2.5" />
+          <path d="M3.75 4.75v10.5c0 1.38 2.8 2.5 6.25 2.5s6.25-1.12 6.25-2.5V4.75" />
+          <path d="M3.75 10c0 1.38 2.8 2.5 6.25 2.5s6.25-1.12 6.25-2.5" />
+        </svg>
+      </span>
+      <p class="text-lg font-medium text-text">
+        {profiles.length === 0 ? "No profiles yet" : "No profile selected"}
+      </p>
+      <p class="text-base text-text-muted">
+        {profiles.length === 0
+          ? "Create a profile to describe how to reach a database."
+          : "Pick a profile on the left to edit or connect it."}
+      </p>
+    </div>
   {:else}
-    <ProfileForm
-      profile={selectedProfile}
-      error={formError}
-      isConnected={isSelectedConnected}
-      {testing}
-      {outcome}
-      onSave={handleSave}
-      onDelete={handleDelete}
-      onTest={handleTest}
-      onConnect={handleConnect}
-      onDisconnect={handleDisconnect}
-    />
+    <div class="w-full max-w-xl px-8 py-7">
+      <ProfileForm
+        profile={selectedProfile}
+        error={formError}
+        isConnected={isSelectedConnected}
+        {testing}
+        {outcome}
+        onSave={handleSave}
+        onDelete={handleDelete}
+        onTest={handleTest}
+        onConnect={handleConnect}
+        onDisconnect={handleDisconnect}
+      />
+    </div>
   {/if}
 </main>

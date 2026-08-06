@@ -11,6 +11,13 @@
 // MySQL commits implicitly before DDL, so for CREATE, DROP, ALTER and TRUNCATE
 // the classifier is the only layer there is.
 //
+// Classify judges one buffer whole, and a buffer holding several statements is
+// a mutation on that ground alone. SplitStatements is what lets the editor
+// avoid that: it returns each statement's extent in the buffer, taken from the
+// parser rather than from a scan for semicolons, so run-at-cursor submits one
+// statement and each gets its own verdict. Text it cannot parse becomes one
+// span running to the end of the buffer, which Classify then withholds.
+//
 // # Impact Preview
 //
 // PlanPreview rewrites a mutation into the reads that describe it — a COUNT and

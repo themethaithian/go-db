@@ -122,6 +122,13 @@ func (a *App) Classify(sql string) guard.Classification {
 	return a.svc.Classify(sql)
 }
 
+// SplitStatements returns the extent of every statement in sql. The editor
+// calls it to find the statement the cursor is in, so Run submits that one
+// statement rather than the whole buffer. The offsets are into UTF-8 bytes.
+func (a *App) SplitStatements(sql string) []guard.StatementSpan {
+	return a.svc.SplitStatements(sql)
+}
+
 // RunQuery submits sql on the named Profile from the SQL editor. The editor
 // is the human Origin — an AI query arrives only through the MCP server,
 // which is not wired in yet — so this binding hardcodes guard.OriginHuman

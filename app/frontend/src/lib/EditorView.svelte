@@ -1,13 +1,24 @@
 <script lang="ts">
-  // The Editor: a SQL editor, its results below, and a draggable splitter at
-  // the seam. Nothing else — browsing a schema is the Explorer's job, and the
-  // two were only ever confusing on one screen: a tree highlighting `orders`
-  // beside an editor now selecting from `users` is a screen that lies.
+  // The Editor: query tabs over a SQL editor, its results below, and a
+  // draggable splitter at the seam. Nothing else — browsing a schema is the
+  // Explorer's job, and the two were only ever confusing on one screen: a tree
+  // highlighting `orders` beside an editor now selecting from `users` is a
+  // screen that lies.
   //
-  // Editor-local state (sql text, classification, run result, the selected
-  // Profile) lives here; connectedProfiles is owned and refreshed by
-  // App.svelte and passed down, since it also drives the status bar; the pane
-  // sizes live at module scope so they survive a trip to another view.
+  // The SQL itself is not held here. It belongs to the open documents
+  // (documents.svelte.ts), which outlive this component — a view is unmounted
+  // on every switch, and a query that vanished because someone glanced at the
+  // Approval Console was the old behaviour, not a design. What is held here is
+  // everything about the current run: classification, results, a pending
+  // Inline Confirm and the selected Profile. connectedProfiles is owned and
+  // refreshed by App.svelte and passed down, since it also drives the status
+  // bar; the pane sizes live at module scope so they survive a trip elsewhere.
+  //
+  // One statement runs at a time. The buffer may hold a dozen; Run sends the
+  // one under the cursor (or the selection, when there is one), so a
+  // half-finished DELETE two statements down is never submitted alongside the
+  // SELECT the human meant, and each statement meets the Approval Gate on its
+  // own terms.
   import { onMount, untrack } from "svelte";
   import SqlEditor from "./SqlEditor.svelte";
   import ResultsTable from "./ResultsTable.svelte";
@@ -20,7 +31,16 @@
     QUERY_MIN_PX,
     RESULTS_MIN_PX,
   } from "./layout.svelte";
-  import { Classify, RunQuery, CancelPending } from "../../wailsjs/go/app/App";
+  import {
+    activateDocument,
+    closeDocument,
+    documents,
+    openDocument,
+    renameDocument,
+    writeSql,
+  } from "./documents.svelte";
+  import { editorRanges, statementAt, subjectTable, type StatementRange } from "./statements";
+  import { Classify, RunQuery, CancelPending, SplitStatements } from "../../wailsjs/go/app/App";
   import type { guard, service } from "../../wailsjs/go/models";
 
   let {
@@ -36,20 +56,49 @@
     onGoToConnections: () => void;
   } = $props();
 
-  // The seed is read once, as the starting document — deliberately not
-  // watched. Whatever the human types next is theirs, and a later render must
-  // never shove the handed-over statement back over it. (This view is
+  // The seed is read once, and opens a tab of its own named after the table it
+  // reads — deliberately not watched, and never written over an existing
+  // document. Whatever the human has in their tabs is theirs; a handover is a
+  // new piece of work beside it, not a replacement for it. (This view is
   // remounted on every entry, so "once" means "once per visit".)
   const handover = untrack(() => seed);
-  let sql = $state(handover?.sql ?? "");
+  if (handover !== null) {
+    openDocument(handover.sql, subjectTable(handover.sql) ?? undefined);
+  }
+
   let profileName = $state<string | null>(handover?.profile ?? null);
   let classification = $state<guard.Classification | null>(null);
   let running = $state(false);
   let result = $state<service.QueryResult | null>(null);
 
+  // The statement behind what the Results pane is showing — recorded from the
+  // run that produced it, never from the cursor's current whereabouts, so the
+  // caption is a record rather than a promise.
+  let ranSql = $state("");
+
   onMount(() => {
     if (seed !== null) onSeedConsumed();
   });
+
+  // The document in front, and its text. Both are read-through: typing goes
+  // back to the store, which is what makes it survive a view switch.
+  let doc = $derived(documents.active);
+  let sql = $derived(doc.sql);
+
+  // Where the caret is and what is selected under it, as CodeMirror last
+  // reported. A fresh document starts at 0, which is where CodeMirror puts the
+  // caret too.
+  let cursor = $state(0);
+  let selection = $state("");
+
+  // Which tab's name is being edited, if any.
+  let renaming = $state<string | null>(null);
+
+  // How long the splitter waits behind typing before asking the gate to split
+  // the buffer again. Short enough that the badge keeps up with a cursor being
+  // walked through a statement, long enough that a parse does not run on every
+  // keystroke.
+  const SPLIT_DEBOUNCE_MS = 150;
 
   // The horizontal splitter's own footprint (6px hit area + 4px of margin
   // either side), which is height the two panes do not get.
@@ -79,11 +128,72 @@
     }
   });
 
-  // Live classification badge: debounced ~250ms behind typing, and cleared
-  // for an empty editor.
+  // Where the statements in the buffer are, in the editor's own coordinates.
+  // The gate does the splitting — it owns the MySQL grammar — and this is
+  // debounced behind typing because a half-written buffer is re-parsed on
+  // every keystroke otherwise.
+  let statements = $state<StatementRange[]>([]);
+
   $effect(() => {
     const text = sql;
     if (text.trim() === "") {
+      statements = [];
+      return;
+    }
+    const timer = setTimeout(async () => {
+      let ranges: StatementRange[];
+      try {
+        ranges = editorRanges(text, await SplitStatements(text));
+      } catch {
+        // The gate is unreachable — rather than leaving Run dead with text on
+        // screen, treat the buffer as the one statement it usually is and let
+        // the classifier have the last word on it, as it would anyway.
+        ranges = [{ from: 0, to: text.length, text }];
+      }
+      // A split that came back after the human typed again describes a buffer
+      // that no longer exists; the newer split is already on its way.
+      if (untrack(() => sql) === text) statements = ranges;
+    }, SPLIT_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
+
+  let activeStatement = $derived(statementAt(statements, cursor));
+
+  // What Run would send. A selection wins over the cursor: selecting three
+  // lines of a statement and running them is a deliberate act, and the human
+  // who did it does not want the whole statement back.
+  let selected = $derived(selection.trim());
+  let target = $derived(
+    selected !== "" ? selected : (statements[activeStatement]?.text ?? ""),
+  );
+
+  // The tint only appears once there is something to disambiguate. On a
+  // single-statement buffer it would say nothing the buffer does not already
+  // say, and a selection says it better than a tint can.
+  let highlight = $derived(
+    statements.length > 1 && selected === "" && activeStatement !== -1
+      ? { from: statements[activeStatement].from, to: statements[activeStatement].to }
+      : null,
+  );
+
+  // Which of the statements Run is aimed at, in words, beside the badge — the
+  // badge alone would leave a buffer of five statements saying MUTATION with
+  // no clue as to which one.
+  let targetLabel = $derived(
+    selected !== ""
+      ? "selection"
+      : statements.length > 1
+        ? `statement ${activeStatement + 1} of ${statements.length}`
+        : null,
+  );
+
+  // Live classification badge for the statement Run would send — not for the
+  // buffer, which would read as a multi-statement Mutation the moment a second
+  // statement was typed. Debounced ~250ms behind the target changing, and
+  // cleared when there is nothing to run.
+  $effect(() => {
+    const text = target;
+    if (text === "") {
       classification = null;
       return;
     }
@@ -97,20 +207,27 @@
   // is the only way forward, so a second Run cannot spawn a second pending
   // behind the human's back.
   let confirmOpen = $derived(result?.status === "requires_confirmation");
-  let canRun = $derived(profileName !== null && sql.trim() !== "" && !running && !confirmOpen);
+  let canRun = $derived(profileName !== null && target !== "" && !running && !confirmOpen);
 
   async function run() {
-    if (profileName === null || sql.trim() === "" || running || confirmOpen) return;
+    const statement = target;
+    if (profileName === null || statement === "" || running || confirmOpen) return;
     running = true;
     try {
-      result = await RunQuery(profileName, sql);
+      result = await RunQuery(profileName, statement);
+      ranSql = statement;
     } finally {
       running = false;
     }
   }
 
   function handleSqlChange(next: string) {
-    sql = next;
+    writeSql(next);
+  }
+
+  function handleCursorChange(head: number, selectionText: string) {
+    cursor = head;
+    selection = selectionText;
   }
 
   function resizeQuery(next: number) {
@@ -119,15 +236,16 @@
   }
 
   // A withheld mutation is the statement the gate previewed, by ID — not
-  // whatever text is in the editor a moment later. If the human edits the SQL
-  // or switches Profile while its Inline Confirm is open, that statement no
-  // longer reflects their intent, so it is cancelled rather than left to be
-  // confirmed stale. The pending's own ID is read with untrack so this effect
-  // only fires on sql/profileName changing, not on result changing (which it
-  // itself causes).
+  // whatever text is in the editor a moment later. If the human edits the SQL,
+  // switches Profile, or switches to another tab while its Inline Confirm is
+  // open, that statement no longer reflects their intent, so it is cancelled
+  // rather than left to be confirmed stale. The pending's own ID is read with
+  // untrack so this effect only fires on those three changing, not on result
+  // changing (which it itself causes).
   $effect(() => {
     sql;
     profileName;
+    doc.id;
     const pending = untrack(() => result);
     if (pending?.status === "requires_confirmation" && pending.pending_id) {
       CancelPending(pending.pending_id);
@@ -137,8 +255,49 @@
     }
   });
 
+  // Results belong to the run that produced them, and that run was made in one
+  // tab. Coming back to a tab shows its SQL, not rows fetched before the last
+  // time it was left — which nothing has kept true since. Declared after the
+  // cancel above so a withheld statement is retracted before its result is
+  // dropped on the floor.
+  $effect(() => {
+    doc.id;
+    untrack(() => {
+      result = null;
+      ranSql = "";
+    });
+  });
+
   function handlePendingResolved(next: service.QueryResult) {
     result = next;
+  }
+
+  function startRename(id: string) {
+    renaming = id;
+  }
+
+  function commitRename(id: string, name: string) {
+    renameDocument(id, name);
+    if (renaming === id) renaming = null;
+  }
+
+  // The rename box is the only place in this view that takes the keyboard away
+  // from the editor, so it hands it back on both exits: Enter commits, Escape
+  // restores the name it opened with and leaves it committing nothing.
+  function renameKeydown(event: KeyboardEvent & { currentTarget: HTMLInputElement }, id: string) {
+    if (event.key === "Enter") {
+      commitRename(id, event.currentTarget.value);
+    } else if (event.key === "Escape") {
+      event.currentTarget.value = documents.open.find((tab) => tab.id === id)?.name ?? "";
+      renaming = null;
+    }
+  }
+
+  // Opening the box on the name means editing it, which almost always means
+  // replacing it — so it opens selected.
+  function editName(node: HTMLInputElement) {
+    node.focus();
+    node.select();
   }
 </script>
 
@@ -171,8 +330,8 @@
       </label>
     {/if}
 
-    {#if classification}
-      <span class="flex min-w-0 items-center gap-2">
+    <span class="flex min-w-0 items-center gap-2">
+      {#if classification}
         {#if classification.kind === "read"}
           <span
             class="shrink-0 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-xs font-semibold tracking-wide text-success"
@@ -186,12 +345,22 @@
           >
             MUTATION
           </span>
-          <span class="truncate text-sm text-text-subtle" title={classification.reason}>
-            {classification.reason}
-          </span>
         {/if}
-      </span>
-    {/if}
+      {/if}
+
+      <!-- Which statement the badge and Run are talking about. Muted, and
+           absent entirely while there is only one — a buffer of one statement
+           has nothing to disambiguate. -->
+      {#if targetLabel !== null}
+        <span class="shrink-0 text-sm text-text-subtle">{targetLabel}</span>
+      {/if}
+
+      {#if classification && classification.kind !== "read"}
+        <span class="truncate text-sm text-text-subtle" title={classification.reason}>
+          {classification.reason}
+        </span>
+      {/if}
+    </span>
 
     <div class="flex-1"></div>
 
@@ -214,13 +383,99 @@
         class="flex shrink-0 flex-col overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel"
         style="height: {layout.editorQueryHeight}px"
       >
+        <!-- The tab strip is the Query pane's header: the pane is the document,
+             so naming it twice (a "QUERY" caption above a row of names) would
+             be one label too many in 32 pixels. -->
         <div
-          class="flex h-8 shrink-0 items-center justify-between border-b border-border px-3 text-xs font-medium tracking-wide text-text-subtle uppercase"
+          class="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border pr-1"
+          role="tablist"
+          aria-label="Query tabs"
         >
-          <span>Query</span>
+          {#each documents.open as tab (tab.id)}
+            <div
+              class="group flex shrink-0 items-center border-b-2 pr-1 pl-2.5 transition-colors {tab.id ===
+              doc.id
+                ? 'border-accent bg-surface-raised'
+                : 'border-transparent hover:bg-surface-raised/50'}"
+            >
+              {#if renaming === tab.id}
+                <input
+                  class="my-1 w-28 rounded-control border border-accent bg-surface px-1 text-sm text-text focus-visible:outline-none"
+                  value={tab.name}
+                  use:editName
+                  onkeydown={(event) => renameKeydown(event, tab.id)}
+                  onblur={(event) => commitRename(tab.id, event.currentTarget.value)}
+                  aria-label="Rename tab"
+                />
+              {:else}
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={tab.id === doc.id}
+                  class="max-w-44 truncate text-sm transition-colors {tab.id === doc.id
+                    ? 'font-medium text-text'
+                    : 'text-text-muted hover:text-text'}"
+                  title="{tab.name} — double-click to rename"
+                  onclick={() => activateDocument(tab.id)}
+                  ondblclick={() => startRename(tab.id)}
+                >
+                  {tab.name}
+                </button>
+              {/if}
+
+              <button
+                type="button"
+                class="ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-control text-text-subtle transition-opacity hover:bg-surface-overlay hover:text-text group-hover:opacity-100 focus-visible:opacity-100 {tab.id ===
+                doc.id
+                  ? 'opacity-60'
+                  : 'opacity-0'}"
+                title="Close tab"
+                aria-label="Close {tab.name}"
+                onclick={() => closeDocument(tab.id)}
+              >
+                <svg
+                  class="h-2.5 w-2.5"
+                  viewBox="0 0 10 10"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  aria-hidden="true"
+                >
+                  <path d="M2 2l6 6M8 2l-6 6" />
+                </svg>
+              </button>
+            </div>
+          {/each}
+
+          <button
+            type="button"
+            class="my-1 ml-1 flex w-6 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-raised hover:text-text"
+            title="New query tab"
+            aria-label="New query tab"
+            onclick={() => openDocument()}
+          >
+            <svg
+              class="h-3 w-3"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M6 2v8M2 6h8" />
+            </svg>
+          </button>
         </div>
         <div class="min-h-0 flex-1">
-          <SqlEditor value={sql} onChange={handleSqlChange} onRun={run} />
+          <SqlEditor
+            value={sql}
+            {highlight}
+            onChange={handleSqlChange}
+            onCursorChange={handleCursorChange}
+            onRun={run}
+          />
         </div>
       </section>
 
@@ -244,10 +499,20 @@
         <section
           class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel"
         >
-          <div
-            class="flex h-8 shrink-0 items-center justify-between border-b border-border px-3 text-xs font-medium tracking-wide text-text-subtle uppercase"
-          >
-            <span>Results</span>
+          <!-- The caption is the statement these rows came from, which on a
+               multi-statement buffer is the only thing that says which one ran.
+               Before the first run there is nothing to record, so the pane
+               simply names itself. -->
+          <div class="flex h-8 shrink-0 items-center justify-between gap-3 border-b border-border px-3">
+            {#if ranSql === ""}
+              <span class="text-xs font-medium tracking-wide text-text-subtle uppercase">
+                Results
+              </span>
+            {:else}
+              <span class="truncate font-mono text-xs text-text-subtle" title={ranSql}>
+                {ranSql}
+              </span>
+            {/if}
           </div>
 
           {#if result === null}

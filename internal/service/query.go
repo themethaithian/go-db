@@ -99,6 +99,14 @@ func (s *AppService) Classify(sql string) guard.Classification {
 	return guard.Classify(sql)
 }
 
+// SplitStatements reports where every statement in sql begins and ends, so the
+// editor can run the one under the cursor instead of the whole buffer. The
+// boundaries come from the same parser the classifier uses, so the span the
+// badge is computed from is the text RunQuery is given.
+func (s *AppService) SplitStatements(sql string) []guard.StatementSpan {
+	return guard.SplitStatements(sql)
+}
+
 // RunQuery submits one query on the named Profile, on behalf of origin.
 //
 // Every query passes the Approval Gate's classifier first. Anything not

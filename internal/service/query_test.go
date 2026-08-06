@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -257,6 +258,29 @@ func TestClassifyIsExposedForTheEditor(t *testing.T) {
 		}
 		if got.Reason == "" {
 			t.Errorf("Classify(%q) gave no reason to show", tc.sql)
+		}
+	}
+}
+
+// TestSplitStatementsIsExposedForTheEditor covers the seam run-at-cursor is
+// built on. The boundaries themselves are specified in internal/guard; what
+// this pins is that the facade offers them at all, and hands back what the
+// domain decided rather than a view of its own.
+func TestSplitStatementsIsExposedForTheEditor(t *testing.T) {
+	svc := newConnectedFacade(t, dbtest.NewFakeKeychain(), dbtest.NewFakeDriver())
+
+	const sql = "SELECT 1; DELETE FROM users;"
+
+	got := svc.SplitStatements(sql)
+	if !slices.Equal(got, guard.SplitStatements(sql)) {
+		t.Fatalf("SplitStatements(%q) = %+v, want the domain's own answer", sql, got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("SplitStatements(%q) = %+v, want one span per statement", sql, got)
+	}
+	for _, span := range got {
+		if sql[span.Start:span.End] != span.Text {
+			t.Errorf("span %+v does not cut its own text out of the buffer", span)
 		}
 	}
 }

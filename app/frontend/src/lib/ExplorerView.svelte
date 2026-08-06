@@ -314,12 +314,26 @@
   // Clicking a row picks it and nothing else — including when it was already
   // one of several, which is the way back from a comparison to a single row.
   // Cmd (or Ctrl) adds a row to the comparison, or takes it back out, and the
-  // order rows go in is the order their columns appear in the pane. There is
-  // no cap: the pane scrolls sideways under the field-name column once the
-  // value columns outrun the width, so comparing more rows than fit is a
-  // scroll away, not a wall.
-  function pickRow(index: number, additive: boolean) {
-    if (!additive) {
+  // order rows go in is the order their columns appear in the pane. Shift
+  // extends the comparison instead of toggling one row: every row between the
+  // last-picked one and the one just clicked joins it, in the order they sit
+  // on screen, skipping whichever of them were already picked. There is no
+  // cap: the pane scrolls sideways under the field-name column once the value
+  // columns outrun the width, so comparing more rows than fit is a scroll
+  // away, not a wall.
+  function pickRow(index: number, options: { additive: boolean; range: boolean }) {
+    if (options.range && selectedRows.length > 0) {
+      const anchor = selectedRows[selectedRows.length - 1];
+      const [from, to] = anchor <= index ? [anchor, index] : [index, anchor];
+      const already = new Set(selectedRows);
+      const added: number[] = [];
+      for (let i = from; i <= to; i += 1) {
+        if (!already.has(i)) added.push(i);
+      }
+      selectedRows = [...selectedRows, ...added];
+      return;
+    }
+    if (!options.additive) {
       selectedRows = [index];
       return;
     }
@@ -664,8 +678,10 @@
                 rows={shownRows}
                 truncated={result.truncated}
                 selectedIndices={pickedIndices}
-                pending={edits.cells(shownColumns)}
-                onRowClick={(index, options) => pickRow(index, options.additive)}
+                {edits}
+                editable={editable.editable}
+                {readOnlyHint}
+                onRowClick={(index, options) => pickRow(index, options)}
               />
             </div>
 

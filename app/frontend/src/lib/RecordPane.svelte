@@ -329,39 +329,15 @@
               {/if}
             </span>
 
-            <div
-              class="absolute top-1 right-1 flex items-center gap-1 transition-opacity group-hover:opacity-100 focus-within:opacity-100 {copied ===
-                key || dirty
-                ? 'opacity-100'
-                : 'opacity-0'}"
-            >
-              {#if dirty}
-                <button
-                  type="button"
-                  class="flex h-5 items-center rounded-control border border-accent/40 bg-surface-raised px-1 text-accent transition-colors hover:bg-accent/15"
-                  onclick={() => edits?.revertCell(at, column)}
-                  title="Undo this edit"
-                  aria-label="Undo this edit"
-                >
-                  <svg
-                    class="h-3 w-3"
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M9.75 8.5a3.5 3.5 0 0 0-3.5-3.5H2.5" />
-                    <path d="M4.25 2.75 2 5l2.25 2.25" />
-                  </svg>
-                </button>
-              {/if}
+            <div class="absolute top-1 right-1 flex items-center gap-1">
               {#if editable}
+                <!-- Visible at rest, at low emphasis, so the edit gesture is
+                     something a first-time visitor sees rather than something
+                     only a hover discovers. Copy and undo stay hover-reveal
+                     below — the field is already carrying enough chrome. -->
                 <button
                   type="button"
-                  class="flex h-5 items-center rounded-control border border-border bg-surface-raised px-1 text-text-muted transition-colors hover:text-text"
+                  class="flex h-5 items-center rounded-control border border-border bg-surface-raised px-1 text-text-subtle transition-colors hover:border-border-strong hover:text-text"
                   onclick={() => startEdit(at, column, value)}
                   title="Edit this value"
                   aria-label="Edit this value"
@@ -380,31 +356,61 @@
                   </svg>
                 </button>
               {/if}
-              <button
-                type="button"
-                class="flex h-5 items-center gap-1 rounded-control border border-border bg-surface-raised px-1 text-text-muted transition-colors hover:text-text"
-                onclick={() => copy(key, value)}
-                title="Copy this value"
-                aria-label="Copy this value"
+              <div
+                class="flex items-center gap-1 transition-opacity group-hover:opacity-100 focus-within:opacity-100 {copied ===
+                  key || dirty
+                  ? 'opacity-100'
+                  : 'opacity-0'}"
               >
-                {#if copied === key}
-                  <span class="px-0.5 text-xs font-medium text-success">Copied</span>
-                {:else}
-                  <svg
-                    class="h-3 w-3"
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
+                {#if dirty}
+                  <button
+                    type="button"
+                    class="flex h-5 items-center rounded-control border border-accent/40 bg-surface-raised px-1 text-accent transition-colors hover:bg-accent/15"
+                    onclick={() => edits?.revertCell(at, column)}
+                    title="Undo this edit"
+                    aria-label="Undo this edit"
                   >
-                    <rect x="4.25" y="4.25" width="5.5" height="5.5" rx="1.25" />
-                    <path d="M7.75 2.25h-5.5v5.5" />
-                  </svg>
+                    <svg
+                      class="h-3 w-3"
+                      viewBox="0 0 12 12"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M9.75 8.5a3.5 3.5 0 0 0-3.5-3.5H2.5" />
+                      <path d="M4.25 2.75 2 5l2.25 2.25" />
+                    </svg>
+                  </button>
                 {/if}
-              </button>
+                <button
+                  type="button"
+                  class="flex h-5 items-center gap-1 rounded-control border border-border bg-surface-raised px-1 text-text-muted transition-colors hover:text-text"
+                  onclick={() => copy(key, value)}
+                  title="Copy this value"
+                  aria-label="Copy this value"
+                >
+                  {#if copied === key}
+                    <span class="px-0.5 text-xs font-medium text-success">Copied</span>
+                  {:else}
+                    <svg
+                      class="h-3 w-3"
+                      viewBox="0 0 12 12"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <rect x="4.25" y="4.25" width="5.5" height="5.5" rx="1.25" />
+                      <path d="M7.75 2.25h-5.5v5.5" />
+                    </svg>
+                  {/if}
+                </button>
+              </div>
             </div>
           {/if}
         </div>
@@ -412,3 +418,14 @@
     {/each}
   </div>
 </div>
+
+{#if !comparing}
+  <!-- The two gestures this pane has and nothing on screen otherwise says:
+       cmd/ctrl-click (or shift-click, or ctrl-click) another row to start a
+       comparison, and — when the row can be written to — double-click a
+       value to edit it. Dropped once there is more than one row picked: the
+       comparison it is teaching has, at that point, already happened. -->
+  <div class="shrink-0 border-t border-border/60 px-3 py-1.5 text-xs text-text-subtle">
+    ⌘ click more rows to compare{editable ? " · double-click a value to edit" : ""}
+  </div>
+{/if}

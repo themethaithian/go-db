@@ -139,21 +139,6 @@ export class RowEdits {
   }
 
   /**
-   * The dirty cells as grid coordinates — `row:column index` — so the results
-   * table can tint and show them without being told about columns by name.
-   */
-  cells(columns: string[]): Map<string, CellValue> {
-    const map = new Map<string, CellValue>();
-    for (const [row, patch] of Object.entries(this.#patches)) {
-      for (const [column, value] of Object.entries(patch)) {
-        const index = columns.indexOf(column);
-        if (index !== -1) map.set(`${row}:${index}`, value);
-      }
-    }
-    return map;
-  }
-
-  /**
    * Sends every dirty row through the gate, one statement at a time, and
    * returns how many of them the human confirmed. A count short of the dirty
    * rows means the run stopped — cancelled, refused, or abandoned — and the

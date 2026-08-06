@@ -19,6 +19,12 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 )
 
+// processStart is the process's launch time, captured as early as possible
+// so App.Ready can report launch-to-usable (CLAUDE.md budget: < 2 s) once
+// the frontend calls it on first mount. It is not meaningful for the `mcp`
+// subcommand, which never constructs an App.
+var processStart = time.Now()
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		runMCP(os.Args[2:])
@@ -40,7 +46,7 @@ func main() {
 		guard.NewJSONLAuditLog(configDir),
 		time.Now,
 	)
-	shell := app.New(svc)
+	shell := app.New(svc, processStart)
 
 	// The local API is a second, thin adapter over the same facade: a
 	// loopback-only, token-gated pipe the MCP proxy talks to. It shares the

@@ -6,6 +6,11 @@ package app
 import (
 	"context"
 	"embed"
+	"fmt"
+	"os"
+	"runtime"
+	"sync"
+	"time"
 
 	"github.com/themethaithian/go-db/internal/db"
 	"github.com/themethaithian/go-db/internal/guard"
@@ -25,13 +30,17 @@ func Assets() embed.FS {
 // domain types (db.Profile) to TS models for the frontend. It owns no logic
 // of its own.
 type App struct {
-	ctx context.Context
-	svc *service.AppService
+	ctx       context.Context
+	svc       *service.AppService
+	startedAt time.Time
+	readyOnce sync.Once
 }
 
-// New creates a new App instance backed by svc.
-func New(svc *service.AppService) *App {
-	return &App{svc: svc}
+// New creates a new App instance backed by svc. startedAt is the process's
+// launch time (main.go's package-level time.Now()), captured here so Ready
+// can report launch-to-usable once the frontend has mounted.
+func New(svc *service.AppService, startedAt time.Time) *App {
+	return &App{svc: svc, startedAt: startedAt}
 }
 
 // Startup is called by Wails when the app starts, before the frontend is
@@ -131,4 +140,39 @@ func (a *App) ApprovePending(id string) service.ApprovalAck {
 // RejectPending refuses the Approval Console entry waiting under id.
 func (a *App) RejectPending(id string) service.ApprovalAck {
 	return a.svc.RejectPending(id)
+}
+
+// MemoryUsageMB reports the app process's current memory footprint in
+// megabytes. The status bar polls this to keep the performance budget
+// (CLAUDE.md: idle RAM < 150 MB) continuously visible and self-checking.
+//
+// What's measured: the app process's own physical footprint — on darwin,
+// the same number Activity Monitor's Memory column shows, via mach
+// task_info(TASK_VM_INFO). WKWebView helper processes the OS launches to
+// render the frontend are separate processes with their own footprint and
+// are NOT included here; README's "Measured" section accounts for the
+// whole picture by measuring them separately. If the platform call is
+// unavailable or fails, this falls back to runtime.MemStats.Sys — memory
+// obtained from the OS for the Go heap and stacks — which understates the
+// true footprint but keeps the gauge alive rather than blank.
+func (a *App) MemoryUsageMB() float64 {
+	if bytes, ok := memoryUsageBytes(); ok {
+		return float64(bytes) / (1024 * 1024)
+	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return float64(m.Sys) / (1024 * 1024)
+}
+
+// Ready is called once by the frontend on its first mount. It logs
+// launch-to-usable — process start to first frontend paint — to stderr so
+// the number stays observable on every run, proving the CLAUDE.md launch
+// budget (< 2 s) rather than just asserting it. Kept permanently: it costs
+// nothing at steady state and only ever fires once per process, guarded by
+// readyOnce in case the frontend calls it more than once (e.g. a reload).
+func (a *App) Ready() {
+	a.readyOnce.Do(func() {
+		elapsed := time.Since(a.startedAt)
+		fmt.Fprintf(os.Stderr, "go-db: usable in %dms\n", elapsed.Milliseconds())
+	})
 }

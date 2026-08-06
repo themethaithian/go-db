@@ -7,7 +7,7 @@
   import ConnectionsView from "./lib/ConnectionsView.svelte";
   import EditorView from "./lib/EditorView.svelte";
   import ApprovalConsole from "./lib/ApprovalConsole.svelte";
-  import { ConnectedProfiles, ListPendingApprovals } from "../wailsjs/go/app/App";
+  import { ConnectedProfiles, ListPendingApprovals, MemoryUsageMB, Ready } from "../wailsjs/go/app/App";
   import type { guard } from "../wailsjs/go/models";
 
   type View = "connections" | "editor" | "approvals";
@@ -16,9 +16,20 @@
   // pendingApprovals so the nav badge stays live from every view.
   const APPROVALS_POLL_MS = 2000;
 
+  // Poll interval for the status bar's live RAM gauge (CLAUDE.md budget:
+  // idle RAM < 150 MB). Same cadence as the approvals poll — cheap enough
+  // to run continuously, proving the budget rather than just asserting it.
+  const MEMORY_POLL_MS = 2000;
+
+  // Idle RAM budget from CLAUDE.md / README's "Performance budget as a
+  // feature" section. The gauge renders in the warning token color once it
+  // crosses this line — the budget keeping itself honest.
+  const MEMORY_BUDGET_MB = 150;
+
   let view = $state<View>("connections");
   let connectedProfiles = $state<string[]>([]);
   let pendingApprovals = $state<guard.Waiting[]>([]);
+  let memoryMB = $state<number | null>(null);
 
   let statusText = $derived(
     connectedProfiles.length === 0
@@ -34,11 +45,23 @@
     pendingApprovals = await ListPendingApprovals();
   }
 
+  async function refreshMemory() {
+    memoryMB = await MemoryUsageMB();
+  }
+
   onMount(() => {
+    // Tells the shell the frontend has mounted, so it can log
+    // launch-to-usable once to stderr (CLAUDE.md budget: < 2 s).
+    Ready();
     refreshConnections();
     refreshApprovals();
-    const interval = setInterval(refreshApprovals, APPROVALS_POLL_MS);
-    return () => clearInterval(interval);
+    refreshMemory();
+    const approvalsInterval = setInterval(refreshApprovals, APPROVALS_POLL_MS);
+    const memoryInterval = setInterval(refreshMemory, MEMORY_POLL_MS);
+    return () => {
+      clearInterval(approvalsInterval);
+      clearInterval(memoryInterval);
+    };
   });
 
   function switchView(next: View) {
@@ -110,6 +133,13 @@
         </span>
       {/if}
     </span>
-    <span>— MB</span>
+    <span
+      class={memoryMB !== null && memoryMB > MEMORY_BUDGET_MB ? "text-warning" : ""}
+      title={memoryMB !== null && memoryMB > MEMORY_BUDGET_MB
+        ? `over the ${MEMORY_BUDGET_MB} MB idle budget`
+        : undefined}
+    >
+      {memoryMB === null ? "— MB" : `${Math.round(memoryMB)} MB`}
+    </span>
   </footer>
 </div>

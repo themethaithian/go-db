@@ -63,7 +63,12 @@ graph TB
 go-db proves its lightness continuously:
 - **Idle RAM < 150 MB**: You can keep it open all day.
 - **Launch-to-usable < 2 s**: No Eclipse startup tax.
-- **Live RAM gauge in the status bar**: The app shows you its footprint, updated in real time. This is not a promise—it is a guarantee you can verify every time you run it.
+- **Live RAM gauge in the status bar**: The app shows you its footprint, updated in real time. This is not a promise—it is a guarantee you can verify every time you run it. It turns warning-colored if it ever crosses the budget.
+
+**Measured (v1, 2026-08-06, Apple Silicon macOS):**
+- Launch-to-usable: **913 ms** median of 3 cold launches (process start → first frontend paint, logged by the app itself as `go-db: usable in XXXms`).
+- Idle RAM after 20 s: app process **29 MB** physical footprint (mach `task_info`, the Activity Monitor number) + WKWebView helper processes ≈ 80 MB RSS (WebContent 47 MB, GPU 22 MB, Networking 11 MB) ≈ **109 MB** total.
+- The status-bar gauge reports the app process footprint; the helper processes belong to the OS's WebKit and are counted here for honesty.
 
 ## v1 roadmap
 

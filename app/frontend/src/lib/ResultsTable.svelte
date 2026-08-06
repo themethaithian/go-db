@@ -3,32 +3,42 @@
   // client-side. Holds no knowledge of how the query ran — App/EditorView
   // decide when to show it.
   //
-  // A row can also be picked, for views that show one row on its own (the
-  // Explorer's Row pane). The selection is not this table's state: it is
-  // passed in as an index into `rows` and reported back on click, so the one
-  // component that renders the picked row and the one that highlights it
-  // cannot disagree. Leaving both props off — as the Editor does — leaves
+  // Rows can also be picked, for views that show the picked rows on their own
+  // (the Explorer's record pane). The selection is not this table's state: it
+  // is passed in as indices into `rows` and reported back on click, so the one
+  // component that renders the picked rows and the one that highlights them
+  // cannot disagree. Whether a click adds to the selection or replaces it is
+  // that same caller's business too — this table only says which modifier the
+  // mouse was holding. Leaving both props off — as the Editor does — leaves
   // rows unclickable and the markup unchanged.
   let {
     columns,
     rows,
     truncated,
-    selectedIndex = null,
+    selectedIndices = [],
     onRowClick,
   }: {
     columns: string[];
     rows: (string | null)[][];
     truncated: boolean;
-    /** Index into `rows` of the picked row, or null. Ignored without onRowClick. */
-    selectedIndex?: number | null;
+    /** Indices into `rows` of the picked rows, newest last. Ignored without onRowClick. */
+    selectedIndices?: number[];
     /** Given, rows become clickable and report their index into `rows`. */
-    onRowClick?: (index: number) => void;
+    onRowClick?: (index: number, options: { additive: boolean }) => void;
   } = $props();
 
   const pageSize = 50;
   let page = $state(0);
 
   let selectable = $derived(onRowClick !== undefined);
+  let picked = $derived(new Set(selectedIndices));
+
+  // The row the selection last moved to — the one the page and the scroll
+  // follow. Earlier picks stay highlighted where they are: adding a row to a
+  // comparison should not yank the grid back to the first one.
+  let focused = $derived(
+    selectedIndices.length === 0 ? null : selectedIndices[selectedIndices.length - 1],
+  );
 
   // A new result set always starts on page 1, whatever page the previous
   // one was left on.
@@ -37,12 +47,12 @@
     page = 0;
   });
 
-  // A selection made from outside the visible page (the Row pane's up/down
+  // A selection made from outside the visible page (the record pane's up/down
   // keys walking off the end of one) brings its page with it, so the
   // highlighted row is always a row you can see.
   $effect(() => {
-    if (selectedIndex === null) return;
-    const target = Math.floor(selectedIndex / pageSize);
+    if (focused === null) return;
+    const target = Math.floor(focused / pageSize);
     if (page !== target) page = target;
   });
 
@@ -94,22 +104,24 @@
         <!--
           A picked row is a row you clicked, so it carries a click handler and
           says which one it is. Svelte's a11y rules see a bare <tr>; the
-          keyboard route to the same thing is the Row pane's own up/down and
-          Escape, handled where that pane lives.
+          keyboard route to the same thing is the record pane's own up/down
+          and Escape, handled where that pane lives.
         -->
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
         <tbody class="font-mono text-base">
           {#each pageRows as row, i (i)}
             {@const index = page * pageSize + i}
-            {@const picked = selectable && selectedIndex === index}
+            {@const chosen = selectable && picked.has(index)}
             <tr
-              class="transition-colors {picked
+              class="transition-colors {chosen
                 ? 'bg-accent/15'
                 : 'hover:bg-surface-overlay'} {selectable ? 'cursor-pointer' : ''}"
-              aria-selected={selectable ? picked : undefined}
-              onclick={onRowClick === undefined ? undefined : () => onRowClick(index)}
-              use:reveal={picked}
+              aria-selected={selectable ? chosen : undefined}
+              onclick={onRowClick === undefined
+                ? undefined
+                : (event) => onRowClick(index, { additive: event.metaKey || event.ctrlKey })}
+              use:reveal={index === focused}
             >
               {#each row as cell, j (j)}
                 <td class="border-b border-border/60 px-3 py-2 text-text tabular-nums whitespace-nowrap">

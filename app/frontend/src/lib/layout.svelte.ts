@@ -22,9 +22,15 @@ export const TREE_MAX_PX = 420;
 export const QUERY_MIN_PX = 120;
 export const RESULTS_MIN_PX = 160;
 
-/** Minimum width of the Explorer's Row pane, and of the grid it sits beside. */
+/** Minimum width of the Explorer's record pane, and of the grid it sits beside. */
 export const DETAIL_MIN_PX = 220;
 export const GRID_MIN_PX = 240;
+
+/**
+ * Minimum width of the record pane while it is comparing rows: two value
+ * columns squeezed into one row's worth of pane compare nothing legibly.
+ */
+export const COMPARE_MIN_PX = 400;
 
 type Layout = {
   /** Explorer: width of the Database tool window. */

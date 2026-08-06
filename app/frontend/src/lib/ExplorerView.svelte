@@ -23,10 +23,12 @@
   // that the panel writes queries they did not.
   import { untrack } from "svelte";
   import DatabaseTree from "./DatabaseTree.svelte";
+  import RecordPane from "./RecordPane.svelte";
   import ResultsTable from "./ResultsTable.svelte";
   import Splitter from "./Splitter.svelte";
   import {
     clamp,
+    COMPARE_MIN_PX,
     DETAIL_MIN_PX,
     GRID_MIN_PX,
     layout,
@@ -62,8 +64,16 @@
   } = $props();
 
   // The vertical splitter's own footprint (a 6px hit area), which is width
-  // neither the grid nor the Row pane gets.
+  // neither the grid nor the record pane gets.
   const SPLITTER_PX = 6;
+
+  // How many rows may be compared at once. Comparison is reading, and four
+  // columns of values is about as much as a pane beside a grid can show
+  // before the reading stops being easier than the grid it came from.
+  const MAX_COMPARE_ROWS = 4;
+
+  /** How long the "up to 4 rows" note stays in the pane header. */
+  const NOTE_MS = 2000;
 
   let result = $state<service.QueryResult | null>(null);
   let failure = $state<string | null>(null);
@@ -78,10 +88,16 @@
   // query. Nothing is fetched while a half-written WHERE is on screen.
   let filterInput = $state(browse.filter);
 
-  // The picked row, as an index into the rows on screen — null when the Row
-  // pane is closed. Every fetch clears it: an index means nothing against a
-  // result set it was not taken from.
-  let selectedRow = $state<number | null>(null);
+  // The picked rows, as indices into the rows on screen and in the order they
+  // were picked — that order is the order of the record pane's value columns.
+  // Empty means the pane is closed. Every fetch clears it: an index means
+  // nothing against a result set it was not taken from.
+  let selectedRows = $state<number[]>([]);
+
+  // Set for a moment when a cmd-click is turned away at the cap, so the pane
+  // can say why nothing happened. Silence would read as a dead click.
+  let capNote = $state(false);
+  let noteTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Data shows the grid and its WHERE/LIMIT controls; Structure shows the
   // table's columns and indexes instead. It is not scoped by table the way
@@ -106,12 +122,18 @@
   let shownRows = $derived(
     result?.status === "ok" ? ((result.rows ?? []) as (string | null)[][]) : [],
   );
-  let detailRow = $derived(selectedRow === null ? null : (shownRows[selectedRow] ?? null));
+  // The selection as the pane and the grid both see it: indices that still
+  // point at a row, and those rows' cells in the same order. Filtering here
+  // rather than trusting the state means a selection can never outlive the
+  // rows it was taken from, however it was cleared.
+  let pickedIndices = $derived(selectedRows.filter((index) => shownRows[index] !== undefined));
+  let pickedRows = $derived(pickedIndices.map((index) => shownRows[index]));
 
   let filterDirty = $derived(filterInput.trim() !== browse.filter);
-  let detailMax = $derived(
-    Math.max(DETAIL_MIN_PX, bodyWidth - GRID_MIN_PX - SPLITTER_PX),
-  );
+  // Comparing asks for more room than reading one row does, so the pane's
+  // floor moves with what it is doing.
+  let detailMin = $derived(pickedIndices.length > 1 ? COMPARE_MIN_PX : DETAIL_MIN_PX);
+  let detailMax = $derived(Math.max(detailMin, bodyWidth - GRID_MIN_PX - SPLITTER_PX));
 
   // The tree's own node for the selected table — the schema cache the
   // Structure view reads and refreshes, shared with the Database tree so the
@@ -161,7 +183,7 @@
       failure = null;
       loading = false;
       shownSql = "";
-      selectedRow = null;
+      selectedRows = [];
       return;
     }
     void fetchRows(profileName, sql);
@@ -175,20 +197,28 @@
     filterInput = browse.filter;
   });
 
-  // A window that shrinks must shrink the Row pane with it, or the grid
-  // disappears off the edge with no way to drag it back.
+  // A window that shrinks must shrink the record pane with it, or the grid
+  // disappears off the edge with no way to drag it back — and a pane that
+  // starts comparing is widened to the comparison's floor the same way.
   $effect(() => {
+    const min = detailMin;
     const max = detailMax;
-    if (bodyWidth > 0 && layout.explorerDetailWidth > max) {
-      layout.explorerDetailWidth = max;
-    }
+    if (bodyWidth <= 0) return;
+    const next = clamp(untrack(() => layout.explorerDetailWidth), min, max);
+    if (next !== layout.explorerDetailWidth) layout.explorerDetailWidth = next;
+  });
+
+  // The cap note is a timer, and a timer that outlives the view would write
+  // to state nobody is watching.
+  $effect(() => () => {
+    if (noteTimer !== null) clearTimeout(noteTimer);
   });
 
   async function fetchRows(profileName: string, sql: string) {
     const request = (latestRequest += 1);
-    // A row picked out of the old result set cannot survive a new one — the
-    // index would land on some other row, or on none.
-    selectedRow = null;
+    // Rows picked out of the old result set cannot survive a new one — the
+    // indices would land on some other rows, or on none.
+    selectedRows = [];
     // Rows from the table we were looking at a moment ago are worse than no
     // rows: they would sit under another table's name, or another condition.
     // They go the instant the statement changes — but re-running the same one
@@ -262,13 +292,42 @@
     applyFilter();
   }
 
-  // Escape closes the Row pane from anywhere, and up/down walk the selection
+  // Clicking a row picks it and nothing else — including when it was already
+  // one of several, which is the way back from a comparison to a single row.
+  // Cmd (or Ctrl) adds a row to the comparison, or takes it back out, and the
+  // order rows go in is the order their columns appear in the pane. Past the
+  // cap the click is refused rather than silently dropping someone else's
+  // row: which of the four to give up is not this view's decision to make.
+  function pickRow(index: number, additive: boolean) {
+    if (!additive) {
+      selectedRows = [index];
+      return;
+    }
+    if (selectedRows.includes(index)) {
+      selectedRows = selectedRows.filter((picked) => picked !== index);
+      return;
+    }
+    if (selectedRows.length >= MAX_COMPARE_ROWS) {
+      showCapNote();
+      return;
+    }
+    selectedRows = [...selectedRows, index];
+  }
+
+  function showCapNote() {
+    capNote = true;
+    if (noteTimer !== null) clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => (capNote = false), NOTE_MS);
+  }
+
+  // Escape clears the whole selection from anywhere, and up/down walk one row
   // through the rows — but never while a control has the focus, where those
-  // keys already mean something to it.
+  // keys already mean something to it. Walking out of a comparison collapses
+  // it: the keys move a single row, and the pane follows what they moved.
   function handleWindowKey(event: KeyboardEvent) {
-    if (selectedRow === null) return;
+    if (selectedRows.length === 0) return;
     if (event.key === "Escape") {
-      selectedRow = null;
+      selectedRows = [];
       return;
     }
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -276,7 +335,8 @@
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
     event.preventDefault();
     const step = event.key === "ArrowDown" ? 1 : -1;
-    selectedRow = clamp(selectedRow + step, 0, shownRows.length - 1);
+    const from = selectedRows[selectedRows.length - 1];
+    selectedRows = [clamp(from + step, 0, shownRows.length - 1)];
   }
 
   function openInEditor() {
@@ -297,13 +357,9 @@
   }
 
   // The splitter reports the width of the pane before it — the grid — so the
-  // Row pane is whatever the strip has left over.
+  // record pane is whatever the strip has left over.
   function resizeDetail(gridWidth: number) {
-    layout.explorerDetailWidth = clamp(
-      bodyWidth - SPLITTER_PX - gridWidth,
-      DETAIL_MIN_PX,
-      detailMax,
-    );
+    layout.explorerDetailWidth = clamp(bodyWidth - SPLITTER_PX - gridWidth, detailMin, detailMax);
     persistLayout();
   }
 </script>
@@ -583,72 +639,36 @@
                 columns={shownColumns}
                 rows={shownRows}
                 truncated={result.truncated}
-                selectedIndex={selectedRow}
-                onRowClick={(index) => (selectedRow = index)}
+                selectedIndices={pickedIndices}
+                onRowClick={(index, options) => pickRow(index, options.additive)}
               />
             </div>
 
-            {#if detailRow !== null && selectedRow !== null}
+            {#if pickedIndices.length > 0}
               <Splitter
                 orientation="vertical"
                 value={bodyWidth - SPLITTER_PX - layout.explorerDetailWidth}
                 min={GRID_MIN_PX}
-                max={Math.max(GRID_MIN_PX, bodyWidth - SPLITTER_PX - DETAIL_MIN_PX)}
+                max={Math.max(GRID_MIN_PX, bodyWidth - SPLITTER_PX - detailMin)}
                 label="Resize the row pane"
                 onChange={resizeDetail}
               />
 
-              <!-- One row, read down instead of across: the shape you want the
-                   moment a table has more columns than the window has width. -->
+              <!-- The picked rows, read down instead of across: the shape you
+                   want the moment a table has more columns than the window has
+                   width — and, with more than one row picked, side by side. -->
               <aside
                 class="flex shrink-0 flex-col overflow-hidden border-l border-border bg-surface"
                 style="width: {layout.explorerDetailWidth}px"
               >
-                <div class="flex h-8 shrink-0 items-center gap-2 border-b border-border pr-2 pl-3">
-                  <span class="text-xs font-medium tracking-wide text-text-muted uppercase">Row</span>
-                  <span class="ml-auto shrink-0 text-xs tabular-nums text-text-subtle">
-                    {selectedRow + 1} of {shownRows.length}
-                  </span>
-                  <button
-                    type="button"
-                    class="flex h-5 w-5 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-overlay hover:text-text"
-                    onclick={() => (selectedRow = null)}
-                    title="Close the row pane (Esc)"
-                    aria-label="Close the row pane"
-                  >
-                    <svg
-                      class="h-3 w-3"
-                      viewBox="0 0 12 12"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                      stroke-linecap="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M3 3l6 6M9 3l-6 6" />
-                    </svg>
-                  </button>
-                </div>
-
-                <div class="min-h-0 flex-1 overflow-auto">
-                  {#each shownColumns as column, i (column)}
-                    <div class="flex gap-3 border-b border-border/60 px-3 py-1.5">
-                      <span
-                        class="w-24 shrink-0 truncate text-right font-mono text-xs leading-5 text-text-muted"
-                        title={column}
-                      >
-                        {column}
-                      </span>
-                      <span class="min-w-0 flex-1 font-mono text-base leading-5 text-text break-words">
-                        {#if detailRow[i] === null}
-                          <span class="text-text-subtle italic">NULL</span>
-                        {:else}
-                          {detailRow[i]}
-                        {/if}
-                      </span>
-                    </div>
-                  {/each}
-                </div>
+                <RecordPane
+                  columns={shownColumns}
+                  rows={pickedRows}
+                  indices={pickedIndices}
+                  totalRows={shownRows.length}
+                  note={capNote ? `Up to ${MAX_COMPARE_ROWS} rows` : null}
+                  onClose={() => (selectedRows = [])}
+                />
               </aside>
             {/if}
           </div>

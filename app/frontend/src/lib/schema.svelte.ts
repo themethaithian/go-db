@@ -1,0 +1,171 @@
+// The Database tree's model: what the tool window knows about each connected
+// Profile's schema, and how it comes to know it.
+//
+// Like the panel sizes, this lives at module scope so the tree the human
+// arranged — which Profiles are open, which tables are expanded, which table
+// they are looking at — is still there when they come back from Connections.
+//
+// Caching is per Profile and lasts until refresh: tables are fetched the
+// first time a Profile is expanded, a table's columns the first time that
+// table is expanded, and neither is fetched again until the human presses
+// refresh or the Profile disconnects. A schema is not something that changes
+// under you often enough to justify re-asking the database on every click.
+
+import { ListColumns, ListTables } from "../../wailsjs/go/app/App";
+import type { service } from "../../wailsjs/go/models";
+
+/** One table under a Profile, plus its lazily loaded columns. */
+export type TableNode = {
+  name: string;
+  rowEstimate: number | null;
+  expanded: boolean;
+  loading: boolean;
+  /** null until the columns have been fetched at least once. */
+  columns: service.ColumnInfo[] | null;
+  error: string | null;
+};
+
+/** One connected Profile — a root of the tree. */
+export type ProfileNode = {
+  expanded: boolean;
+  loading: boolean;
+  /** null until the tables have been fetched at least once. */
+  tables: TableNode[] | null;
+  error: string | null;
+};
+
+const nodes = $state<Record<string, ProfileNode>>({});
+
+/** Which table row is currently selected, so the tree can show it as such. */
+export const selected = $state<{
+  profile: string | null;
+  table: string | null;
+}>({
+  profile: null,
+  table: null,
+});
+
+function fresh(): ProfileNode {
+  return { expanded: false, loading: false, tables: null, error: null };
+}
+
+// What a Profile looks like in the instant between it appearing in the
+// connected list and syncProfiles giving it a node of its own: collapsed and
+// empty, which is also what it would look like anyway. Frozen because reading
+// it is the only legitimate thing to do with it — anything that tried to
+// expand *this* object would be writing to a node no Profile owns, and should
+// say so loudly rather than lose the write.
+const PLACEHOLDER: ProfileNode = Object.freeze(fresh());
+
+/**
+ * The tree node for profileName — a pure read, safe to call while rendering.
+ * Nodes are created by syncProfiles, never here: creating state in the middle
+ * of a render is exactly the mutation Svelte refuses.
+ */
+export function profileNode(profileName: string): ProfileNode {
+  return nodes[profileName] ?? PLACEHOLDER;
+}
+
+function ensure(profileName: string): ProfileNode {
+  if (nodes[profileName] === undefined) nodes[profileName] = fresh();
+  return nodes[profileName];
+}
+
+/**
+ * Brings the tree's roots in line with the Profiles that are connected right
+ * now: a newly connected Profile gets an empty node, and one that has gone
+ * away takes its cached schema with it, so reconnecting shows the database as
+ * it is now rather than as it was.
+ */
+export function syncProfiles(connected: string[]) {
+  for (const name of Object.keys(nodes)) {
+    if (!connected.includes(name)) delete nodes[name];
+  }
+  for (const name of connected) ensure(name);
+  if (selected.profile !== null && !connected.includes(selected.profile)) {
+    selected.profile = null;
+    selected.table = null;
+  }
+}
+
+/** Expands or collapses a Profile, loading its tables the first time. */
+export function toggleProfile(profileName: string) {
+  const node = ensure(profileName);
+  node.expanded = !node.expanded;
+  if (node.expanded && node.tables === null && !node.loading) {
+    void loadTables(profileName);
+  }
+}
+
+/**
+ * Re-reads the schema of every Profile the tree has an opinion about,
+ * keeping what is expanded expanded. This is the whole of cache invalidation:
+ * there is no staleness heuristic, only a human saying "look again".
+ */
+export function refreshAll() {
+  for (const [name, node] of Object.entries(nodes)) {
+    const expandedTables = new Set(
+      (node.tables ?? []).filter((t) => t.expanded).map((t) => t.name),
+    );
+    node.tables = null;
+    node.error = null;
+    if (node.expanded) void loadTables(name, expandedTables);
+  }
+}
+
+/** Expands or collapses a table, loading its columns the first time. */
+export function toggleTable(profileName: string, table: TableNode) {
+  table.expanded = !table.expanded;
+  if (table.expanded && table.columns === null && !table.loading) {
+    void loadColumns(profileName, table);
+  }
+}
+
+async function loadTables(profileName: string, reExpand: Set<string> = new Set()) {
+  const node = ensure(profileName);
+  node.loading = true;
+  node.error = null;
+  try {
+    const result = await ListTables(profileName);
+    if (result.status !== "ok") {
+      node.error = result.message;
+      node.tables = null;
+      return;
+    }
+    node.tables = (result.tables ?? []).map((info) => ({
+      name: info.name,
+      rowEstimate: info.row_estimate ?? null,
+      expanded: reExpand.has(info.name),
+      loading: false,
+      columns: null,
+      error: null,
+    }));
+    for (const table of node.tables) {
+      if (table.expanded) void loadColumns(profileName, table);
+    }
+  } catch (err) {
+    node.error = String(err);
+    node.tables = null;
+  } finally {
+    node.loading = false;
+  }
+}
+
+async function loadColumns(profileName: string, table: TableNode) {
+  table.loading = true;
+  table.error = null;
+  try {
+    const result = await ListColumns(profileName, table.name);
+    if (result.status !== "ok") {
+      table.error = result.message;
+      table.columns = null;
+      return;
+    }
+    table.columns = result.columns ?? [];
+  } catch (err) {
+    table.error = String(err);
+    table.columns = null;
+  } finally {
+    table.loading = false;
+  }
+}

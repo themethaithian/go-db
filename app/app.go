@@ -97,6 +97,18 @@ func (a *App) ConnectedProfiles() []string {
 	return a.svc.ConnectedProfiles()
 }
 
+// ListTables returns the tables in the named Profile's schema, for the
+// DB Explorer's Database tree.
+func (a *App) ListTables(profileName string) service.TableList {
+	return a.svc.ListTables(a.ctx, profileName)
+}
+
+// ListColumns returns the columns of table in the named Profile's schema,
+// for a table expanded in the DB Explorer's Database tree.
+func (a *App) ListColumns(profileName, table string) service.ColumnList {
+	return a.svc.ListColumns(a.ctx, profileName, table)
+}
+
 // Classify reports whether sql is provably read-only, without connecting to
 // anything or running it. The editor calls it as the human types, to drive
 // the read/mutation badge.

@@ -29,7 +29,11 @@
   } = $props();
 
   let container: HTMLDivElement;
-  let view: EditorView | undefined;
+  // $state so the sync effect below re-runs once the view exists — an effect
+  // that read a plain `let` would run before onMount and never again.
+  // CodeMirror's EditorView is a class instance, which $state leaves
+  // unproxied, so nothing about its internals is touched by this.
+  let view = $state<EditorView | undefined>(undefined);
 
   // Theme built from the design tokens (app.css @theme) — no hard-coded
   // colors, so the editor stays in step with the rest of the app.
@@ -123,6 +127,16 @@
       }),
       parent: container,
     });
+  });
+
+  // Pushes a value set from outside — the Database tree generating a SELECT
+  // for a clicked table — into the document. Typing is unaffected: the text
+  // the human just produced is already the value, so the guard finds them
+  // equal and dispatches nothing, and the cursor stays where they left it.
+  $effect(() => {
+    const next = value;
+    if (view === undefined || view.state.doc.toString() === next) return;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: next } });
   });
 
   onDestroy(() => {

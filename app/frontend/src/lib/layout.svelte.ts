@@ -22,14 +22,24 @@ export const TREE_MAX_PX = 420;
 export const QUERY_MIN_PX = 120;
 export const RESULTS_MIN_PX = 160;
 
+/** Minimum width of the Explorer's Row pane, and of the grid it sits beside. */
+export const DETAIL_MIN_PX = 220;
+export const GRID_MIN_PX = 240;
+
 type Layout = {
   /** Explorer: width of the Database tool window. */
   explorerTreeWidth: number;
+  /** Explorer: width of the Row pane beside the grid, when one row is open. */
+  explorerDetailWidth: number;
   /** Editor: height of the Query pane; Results takes whatever is left. */
   editorQueryHeight: number;
 };
 
-const DEFAULTS: Layout = { explorerTreeWidth: 244, editorQueryHeight: 236 };
+const DEFAULTS: Layout = {
+  explorerTreeWidth: 244,
+  explorerDetailWidth: 300,
+  editorQueryHeight: 236,
+};
 
 const STORAGE_KEY = "go-db:workspace-layout";
 
@@ -47,6 +57,7 @@ function restore(): Layout {
     const parsed = JSON.parse(raw) as Partial<Layout>;
     return {
       explorerTreeWidth: size(parsed.explorerTreeWidth, DEFAULTS.explorerTreeWidth),
+      explorerDetailWidth: size(parsed.explorerDetailWidth, DEFAULTS.explorerDetailWidth),
       editorQueryHeight: size(parsed.editorQueryHeight, DEFAULTS.editorQueryHeight),
     };
   } catch {
@@ -67,6 +78,7 @@ export function persistLayout() {
       STORAGE_KEY,
       JSON.stringify({
         explorerTreeWidth: layout.explorerTreeWidth,
+        explorerDetailWidth: layout.explorerDetailWidth,
         editorQueryHeight: layout.editorQueryHeight,
       }),
     );

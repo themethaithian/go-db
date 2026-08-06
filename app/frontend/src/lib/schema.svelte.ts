@@ -50,8 +50,32 @@ export const selected = $state<{
   table: null,
 });
 
+/** The row counts the Explorer offers, smallest first. */
+export const BROWSE_LIMITS = [50, 200, 500, 1000] as const;
+
+/**
+ * How the selected table is being looked at: the WHERE condition in force
+ * (empty for none) and how many rows to ask for. It lives beside the
+ * selection because it is scoped by it — a condition written for `orders`
+ * means nothing against `users`, so selecting another table drops it, and
+ * that rule is enforced in one place (selectTable) rather than in whichever
+ * component happened to notice.
+ *
+ * The limit is deliberately not scoped that way: it says how much data this
+ * human wants to see at a time, which is true of the next table too. It stays
+ * put for the session, and is not persisted — the next launch starts at the
+ * default, which is the size that comes back instantly on anything.
+ */
+export const browse = $state<{ filter: string; limit: number }>({
+  filter: "",
+  limit: 200,
+});
+
 /** Makes this Profile's table the selected one. */
 export function selectTable(profileName: string, table: string) {
+  if (selected.profile !== profileName || selected.table !== table) {
+    browse.filter = "";
+  }
   selected.profile = profileName;
   selected.table = table;
 }
@@ -96,6 +120,7 @@ export function syncProfiles(connected: string[]) {
   if (selected.profile !== null && !connected.includes(selected.profile)) {
     selected.profile = null;
     selected.table = null;
+    browse.filter = "";
   }
 }
 

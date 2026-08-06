@@ -2,24 +2,48 @@
   // Renders one QueryOK result: columns/rows from the backend, paginated
   // client-side. Holds no knowledge of how the query ran — App/EditorView
   // decide when to show it.
+  //
+  // A row can also be picked, for views that show one row on its own (the
+  // Explorer's Row pane). The selection is not this table's state: it is
+  // passed in as an index into `rows` and reported back on click, so the one
+  // component that renders the picked row and the one that highlights it
+  // cannot disagree. Leaving both props off — as the Editor does — leaves
+  // rows unclickable and the markup unchanged.
   let {
     columns,
     rows,
     truncated,
+    selectedIndex = null,
+    onRowClick,
   }: {
     columns: string[];
     rows: (string | null)[][];
     truncated: boolean;
+    /** Index into `rows` of the picked row, or null. Ignored without onRowClick. */
+    selectedIndex?: number | null;
+    /** Given, rows become clickable and report their index into `rows`. */
+    onRowClick?: (index: number) => void;
   } = $props();
 
   const pageSize = 50;
   let page = $state(0);
+
+  let selectable = $derived(onRowClick !== undefined);
 
   // A new result set always starts on page 1, whatever page the previous
   // one was left on.
   $effect(() => {
     rows;
     page = 0;
+  });
+
+  // A selection made from outside the visible page (the Row pane's up/down
+  // keys walking off the end of one) brings its page with it, so the
+  // highlighted row is always a row you can see.
+  $effect(() => {
+    if (selectedIndex === null) return;
+    const target = Math.floor(selectedIndex / pageSize);
+    if (page !== target) page = target;
   });
 
   let totalRows = $derived(rows.length);
@@ -33,6 +57,17 @@
   }
   function next() {
     if (page < totalPages - 1) page += 1;
+  }
+
+  // Keeps the picked row in view — the selection can be moved by keyboard,
+  // and a highlight below the fold is a highlight nobody sees. Clicking a row
+  // that is already on screen scrolls nothing ("nearest" is a no-op then).
+  function reveal(node: HTMLElement, picked: boolean) {
+    const sync = (on: boolean) => {
+      if (on) node.scrollIntoView({ block: "nearest" });
+    };
+    sync(picked);
+    return { update: sync };
   }
 </script>
 
@@ -56,9 +91,26 @@
             {/each}
           </tr>
         </thead>
+        <!--
+          A picked row is a row you clicked, so it carries a click handler and
+          says which one it is. Svelte's a11y rules see a bare <tr>; the
+          keyboard route to the same thing is the Row pane's own up/down and
+          Escape, handled where that pane lives.
+        -->
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
         <tbody class="font-mono text-base">
           {#each pageRows as row, i (i)}
-            <tr class="transition-colors hover:bg-surface-overlay">
+            {@const index = page * pageSize + i}
+            {@const picked = selectable && selectedIndex === index}
+            <tr
+              class="transition-colors {picked
+                ? 'bg-accent/15'
+                : 'hover:bg-surface-overlay'} {selectable ? 'cursor-pointer' : ''}"
+              aria-selected={selectable ? picked : undefined}
+              onclick={onRowClick === undefined ? undefined : () => onRowClick(index)}
+              use:reveal={picked}
+            >
               {#each row as cell, j (j)}
                 <td class="border-b border-border/60 px-3 py-2 text-text tabular-nums whitespace-nowrap">
                   {#if cell === null}

@@ -14,13 +14,28 @@
   // the header says exactly which statement that was: a data panel that
   // fetched rows by some private path would be asking to be trusted, and this
   // one would rather be checked.
+  //
+  // The controls above the grid — a WHERE condition and a row limit — are
+  // edits to that one statement and nothing more. The condition is dropped in
+  // verbatim, exactly as typed: it is the human's SQL, and the gate that
+  // classifies it (and the READ ONLY transaction behind it) is the same
+  // safety story as the Editor's. Sanitising it here would only teach people
+  // that the panel writes queries they did not.
   import { untrack } from "svelte";
   import DatabaseTree from "./DatabaseTree.svelte";
   import ResultsTable from "./ResultsTable.svelte";
   import Splitter from "./Splitter.svelte";
-  import { clamp, layout, persistLayout, TREE_MAX_PX, TREE_MIN_PX } from "./layout.svelte";
-  import { selected } from "./schema.svelte";
-  import { RunQuery } from "../../wailsjs/go/app/App";
+  import {
+    clamp,
+    DETAIL_MIN_PX,
+    GRID_MIN_PX,
+    layout,
+    persistLayout,
+    TREE_MAX_PX,
+    TREE_MIN_PX,
+  } from "./layout.svelte";
+  import { browse, BROWSE_LIMITS, selected } from "./schema.svelte";
+  import { CancelPending, RunQuery } from "../../wailsjs/go/app/App";
   import type { service } from "../../wailsjs/go/models";
 
   let {
@@ -33,54 +48,98 @@
     onOpenInEditor: (profileName: string, sql: string) => void;
   } = $props();
 
-  // How many rows browsing a table shows. Small enough to come back instantly
-  // on any table, large enough to be a real look at the data.
-  const BROWSE_LIMIT = 200;
+  // The vertical splitter's own footprint (a 6px hit area), which is width
+  // neither the grid nor the Row pane gets.
+  const SPLITTER_PX = 6;
 
   let result = $state<service.QueryResult | null>(null);
   let failure = $state<string | null>(null);
   let loading = $state(false);
   // The statement behind what is on screen right now — set from the fetch
-  // that produced it, never from the current selection, so the caption is a
+  // that produced it, never from the current controls, so the caption is a
   // record rather than a promise.
   let shownSql = $state("");
 
+  // The condition as it is being typed, which is not yet the condition in
+  // force: it becomes browse.filter on Enter, and that is what re-runs the
+  // query. Nothing is fetched while a half-written WHERE is on screen.
+  let filterInput = $state(browse.filter);
+
+  // The picked row, as an index into the rows on screen — null when the Row
+  // pane is closed. Every fetch clears it: an index means nothing against a
+  // result set it was not taken from.
+  let selectedRow = $state<number | null>(null);
+
+  // Width of the grid + Row pane strip, so the splitter between them knows
+  // how far it may travel before one of the two is squeezed out.
+  let bodyWidth = $state(0);
+
   // Fetches are numbered so a slow one cannot overwrite a fast one started
   // later: clicking three tables quickly must leave the third one's rows on
-  // screen, not whichever query the database happened to finish last.
+  // screen, not whichever query the database happened to finish last. Filter
+  // and limit changes take the same numbered path, for the same reason.
   let latestRequest = 0;
 
-  let browseSql = $derived(
-    selected.table === null ? "" : `SELECT * FROM ${quoteIdentifier(selected.table)} LIMIT ${BROWSE_LIMIT}`,
-  );
+  let browseSql = $derived(buildSql(selected.table, browse.filter, browse.limit));
 
   let rowCount = $derived(result?.status === "ok" ? (result.rows?.length ?? 0) : null);
+  let shownColumns = $derived(result?.status === "ok" ? (result.columns ?? []) : []);
+  let shownRows = $derived(
+    result?.status === "ok" ? ((result.rows ?? []) as (string | null)[][]) : [],
+  );
+  let detailRow = $derived(selectedRow === null ? null : (shownRows[selectedRow] ?? null));
 
-  // The selection is the whole input to this view: whenever it changes — from
-  // the tree, from a pin, or from a Profile disconnecting out from under it —
-  // the rows are fetched again for exactly that table.
+  let filterDirty = $derived(filterInput.trim() !== browse.filter);
+  let detailMax = $derived(
+    Math.max(DETAIL_MIN_PX, bodyWidth - GRID_MIN_PX - SPLITTER_PX),
+  );
+
+  // The statement is the whole input to this view: whenever it changes — a
+  // table picked in the tree, a condition applied, a limit chosen, or a
+  // Profile disconnecting out from under it — the rows are fetched again for
+  // exactly that statement.
   $effect(() => {
     const profileName = selected.profile;
-    const table = selected.table;
-    if (profileName === null || table === null) {
+    const sql = browseSql;
+    if (profileName === null || sql === "") {
       latestRequest += 1;
       result = null;
       failure = null;
       loading = false;
       shownSql = "";
+      selectedRow = null;
       return;
     }
-    void browse(profileName, table);
+    void fetchRows(profileName, sql);
   });
 
-  async function browse(profileName: string, table: string) {
+  // The box shows the condition in force: applying one normalises what is
+  // typed, and switching tables (which drops the condition) empties the box
+  // rather than leaving a stale one behind, applied or not.
+  $effect(() => {
+    selected.table;
+    filterInput = browse.filter;
+  });
+
+  // A window that shrinks must shrink the Row pane with it, or the grid
+  // disappears off the edge with no way to drag it back.
+  $effect(() => {
+    const max = detailMax;
+    if (bodyWidth > 0 && layout.explorerDetailWidth > max) {
+      layout.explorerDetailWidth = max;
+    }
+  });
+
+  async function fetchRows(profileName: string, sql: string) {
     const request = (latestRequest += 1);
-    const sql = `SELECT * FROM ${quoteIdentifier(table)} LIMIT ${BROWSE_LIMIT}`;
+    // A row picked out of the old result set cannot survive a new one — the
+    // index would land on some other row, or on none.
+    selectedRow = null;
     // Rows from the table we were looking at a moment ago are worse than no
-    // rows: they would sit under another table's name. They go the instant
-    // the selection moves — but a refresh of the same table keeps them, so
-    // re-running does not blink the grid out and back.
-    // (untracked: this runs inside the selection effect, which must not
+    // rows: they would sit under another table's name, or another condition.
+    // They go the instant the statement changes — but re-running the same one
+    // keeps them, so a refresh does not blink the grid out and back.
+    // (untracked: this runs inside the statement effect, which must not
     // re-fire on the caption it is itself writing.)
     if (untrack(() => shownSql) !== sql) {
       result = null;
@@ -90,6 +149,12 @@
     loading = true;
     try {
       const next = await RunQuery(profileName, sql);
+      // This panel never confirms a write, so a withheld statement's pending
+      // must not linger in the gate's queue (Inline Confirms have no expiry).
+      // Cancelling records the honest outcome: the surface declined to run it.
+      if (next.status === "requires_confirmation" && next.pending_id) {
+        void CancelPending(next.pending_id);
+      }
       if (request !== latestRequest) return;
       result = next;
       failure = null;
@@ -104,9 +169,55 @@
     }
   }
 
+  // The statement, and the only place it is built. Empty condition means no
+  // WHERE clause at all, rather than a WHERE that is quietly always true.
+  function buildSql(table: string | null, filter: string, limit: number): string {
+    if (table === null) return "";
+    const condition = filter.trim();
+    const where = condition === "" ? "" : ` WHERE ${condition}`;
+    return `SELECT * FROM ${quoteIdentifier(table)}${where} LIMIT ${limit}`;
+  }
+
   function refresh() {
-    if (selected.profile === null || selected.table === null) return;
-    void browse(selected.profile, selected.table);
+    if (selected.profile === null || browseSql === "") return;
+    void fetchRows(selected.profile, browseSql);
+  }
+
+  // Enter applies. A condition that has not changed still re-runs the query —
+  // pressing Enter and having nothing at all happen is the kind of silence
+  // that gets read as a broken box.
+  function applyFilter() {
+    const next = filterInput.trim();
+    if (next === browse.filter) refresh();
+    else browse.filter = next;
+  }
+
+  function clearFilter() {
+    filterInput = "";
+    applyFilter();
+  }
+
+  function handleFilterKey(event: KeyboardEvent) {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    applyFilter();
+  }
+
+  // Escape closes the Row pane from anywhere, and up/down walk the selection
+  // through the rows — but never while a control has the focus, where those
+  // keys already mean something to it.
+  function handleWindowKey(event: KeyboardEvent) {
+    if (selectedRow === null) return;
+    if (event.key === "Escape") {
+      selectedRow = null;
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const tag = (event.target as HTMLElement | null)?.tagName;
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    selectedRow = clamp(selectedRow + step, 0, shownRows.length - 1);
   }
 
   function openInEditor() {
@@ -125,7 +236,20 @@
     layout.explorerTreeWidth = clamp(next, TREE_MIN_PX, TREE_MAX_PX);
     persistLayout();
   }
+
+  // The splitter reports the width of the pane before it — the grid — so the
+  // Row pane is whatever the strip has left over.
+  function resizeDetail(gridWidth: number) {
+    layout.explorerDetailWidth = clamp(
+      bodyWidth - SPLITTER_PX - gridWidth,
+      DETAIL_MIN_PX,
+      detailMax,
+    );
+    persistLayout();
+  }
 </script>
+
+<svelte:window onkeydown={handleWindowKey} />
 
 <div class="flex flex-1 overflow-hidden bg-surface">
   <DatabaseTree {connectedProfiles} width={layout.explorerTreeWidth} {onGoToConnections} />
@@ -213,6 +337,86 @@
       <section
         class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel"
       >
+        {#if selected.table !== null}
+          <div class="flex h-11 shrink-0 items-center gap-3 border-b border-border px-3">
+            <div
+              class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-control border border-border bg-surface px-2.5 transition-colors focus-within:border-accent hover:border-border-strong"
+            >
+              <span class="shrink-0 font-mono text-xs font-medium tracking-wide text-text-subtle">
+                WHERE
+              </span>
+              <input
+                class="min-w-0 flex-1 bg-transparent font-mono text-base text-text placeholder:text-text-subtle focus:outline-none"
+                placeholder="city = 'Bangkok' — filter condition"
+                bind:value={filterInput}
+                onkeydown={handleFilterKey}
+                spellcheck="false"
+                autocapitalize="off"
+                autocomplete="off"
+                aria-label="WHERE condition"
+              />
+              {#if filterInput !== ""}
+                <button
+                  type="button"
+                  class="flex h-5 w-5 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-overlay hover:text-text"
+                  onclick={clearFilter}
+                  title="Clear the condition"
+                  aria-label="Clear the condition"
+                >
+                  <svg
+                    class="h-3 w-3"
+                    viewBox="0 0 12 12"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M3 3l6 6M9 3l-6 6" />
+                  </svg>
+                </button>
+              {/if}
+              <!-- The apply affordance, and only when there is something to
+                   apply: a condition on screen that is not the one that ran. -->
+              {#if filterDirty}
+                <button
+                  type="button"
+                  class="flex h-5 shrink-0 items-center gap-1 rounded-control border border-accent/40 bg-accent/10 px-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/20"
+                  onclick={applyFilter}
+                  title="Apply the condition (Enter)"
+                >
+                  <svg
+                    class="h-3 w-3"
+                    viewBox="0 0 12 12"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.4"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M9.5 2.5v3.25a1.5 1.5 0 0 1-1.5 1.5H2.75" />
+                    <path d="M4.75 5.25 2.5 7.25l2.25 2" />
+                  </svg>
+                  Apply
+                </button>
+              {/if}
+            </div>
+
+            <label class="flex shrink-0 items-center gap-1.5 text-xs font-medium tracking-wide text-text-muted uppercase">
+              Limit
+              <select
+                class="h-8 rounded-control border border-border bg-surface-raised px-2 text-base font-normal text-text tabular-nums transition-colors hover:border-border-strong"
+                bind:value={browse.limit}
+              >
+                {#each BROWSE_LIMITS as option (option)}
+                  <option value={option}>{option}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
+        {/if}
+
         <div class="flex h-8 shrink-0 items-center justify-between gap-3 border-b border-border px-3">
           {#if shownSql === ""}
             <span class="text-xs font-medium tracking-wide text-text-subtle uppercase">Data</span>
@@ -278,21 +482,103 @@
             <p class="text-base text-text-muted">Loading rows…</p>
           </div>
         {:else if result.status === "ok"}
-          <ResultsTable
-            columns={result.columns ?? []}
-            rows={(result.rows ?? []) as (string | null)[][]}
-            truncated={result.truncated}
-          />
+          <div class="flex min-h-0 min-w-0 flex-1" bind:clientWidth={bodyWidth}>
+            <div class="flex min-w-0 flex-1">
+              <ResultsTable
+                columns={shownColumns}
+                rows={shownRows}
+                truncated={result.truncated}
+                selectedIndex={selectedRow}
+                onRowClick={(index) => (selectedRow = index)}
+              />
+            </div>
+
+            {#if detailRow !== null && selectedRow !== null}
+              <Splitter
+                orientation="vertical"
+                value={bodyWidth - SPLITTER_PX - layout.explorerDetailWidth}
+                min={GRID_MIN_PX}
+                max={Math.max(GRID_MIN_PX, bodyWidth - SPLITTER_PX - DETAIL_MIN_PX)}
+                label="Resize the row pane"
+                onChange={resizeDetail}
+              />
+
+              <!-- One row, read down instead of across: the shape you want the
+                   moment a table has more columns than the window has width. -->
+              <aside
+                class="flex shrink-0 flex-col overflow-hidden border-l border-border bg-surface"
+                style="width: {layout.explorerDetailWidth}px"
+              >
+                <div class="flex h-8 shrink-0 items-center gap-2 border-b border-border pr-2 pl-3">
+                  <span class="text-xs font-medium tracking-wide text-text-muted uppercase">Row</span>
+                  <span class="ml-auto shrink-0 text-xs tabular-nums text-text-subtle">
+                    {selectedRow + 1} of {shownRows.length}
+                  </span>
+                  <button
+                    type="button"
+                    class="flex h-5 w-5 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-overlay hover:text-text"
+                    onclick={() => (selectedRow = null)}
+                    title="Close the row pane (Esc)"
+                    aria-label="Close the row pane"
+                  >
+                    <svg
+                      class="h-3 w-3"
+                      viewBox="0 0 12 12"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M3 3l6 6M9 3l-6 6" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div class="min-h-0 flex-1 overflow-auto">
+                  {#each shownColumns as column, i (column)}
+                    <div class="flex gap-3 border-b border-border/60 px-3 py-1.5">
+                      <span
+                        class="w-24 shrink-0 truncate text-right font-mono text-xs leading-5 text-text-muted"
+                        title={column}
+                      >
+                        {column}
+                      </span>
+                      <span class="min-w-0 flex-1 font-mono text-base leading-5 text-text break-words">
+                        {#if detailRow[i] === null}
+                          <span class="text-text-subtle italic">NULL</span>
+                        {:else}
+                          {detailRow[i]}
+                        {/if}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              </aside>
+            {/if}
+          </div>
         {:else}
-          <!-- Anything but "ok" from a plain SELECT is the connection or the
-               database talking (not_connected, failed) — shown verbatim,
-               since guessing at what it meant helps nobody. -->
+          <!-- Anything but "ok" is the connection, the database, or the gate
+               talking (not_connected, failed, and — if a condition classifies
+               as a mutation — requires_confirmation or blocked). Shown
+               verbatim, above controls that still work, since the fix is
+               almost always a word in the WHERE box. Nothing here offers to
+               confirm a write: this panel reads. -->
           <div class="p-3">
             <p
               class="rounded-control border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-base text-danger"
             >
               {result.message}
             </p>
+            {#if result.status === "requires_confirmation"}
+              <!-- The gate's message ends "Confirm to run it", and there is
+                   nothing here to confirm with — on purpose. Saying where that
+                   decision does live beats leaving a dead end on screen. -->
+              <p class="px-3 py-2 text-sm text-text-muted">
+                Nothing ran. This panel only reads — fix the condition, or take the statement to
+                the Editor with “Open in editor” and decide on it there.
+              </p>
+            {/if}
           </div>
         {/if}
       </section>

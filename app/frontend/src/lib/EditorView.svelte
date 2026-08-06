@@ -46,7 +46,8 @@
   } from "./documents.svelte";
   import { deleteSaved, openSaved, saved, saveQuery } from "./saved.svelte";
   import { editorRanges, statementAt, subjectTable, type StatementRange } from "./statements";
-  import { ensureIndexes, ensureTables, findTable } from "./schema.svelte";
+  import { ensureColumns, ensureIndexes, ensureTables, findTable, profileNode } from "./schema.svelte";
+  import { mentionedTables, type CompletionSchema } from "./completion";
   import { RowEdits } from "./edits.svelte";
   import { editability, selectTarget } from "./mutate";
   import { Classify, RunQuery, CancelPending, SplitStatements } from "../../wailsjs/go/app/App";
@@ -139,6 +140,43 @@
   // back to the store, which is what makes it survive a view switch.
   let doc = $derived(documents.active);
   let sql = $derived(doc.sql);
+
+  // What SqlEditor's autocomplete knows about the connected Profile's
+  // schema: table names once they load, and — via columnsFor — whichever
+  // table's columns the human has asked for (see completion.ts for why
+  // qualified and unqualified completion both end up calling it). Rebuilt
+  // whenever the Profile, its table list, or any table's cached columns
+  // change; cheap enough that there is no reason to memoize further.
+  let completionSchema = $derived.by((): CompletionSchema | null => {
+    if (profileName === null) return null;
+    const profile = profileName;
+    const tableNames = (profileNode(profile).tables ?? []).map((table) => table.name);
+    return {
+      tables: tableNames,
+      columnsFor: (table) => findTable(profile, table)?.columns?.map((column) => column.name),
+    };
+  });
+
+  // Tables load the moment a Profile is picked, not only once the human
+  // expands it in the Database tree — autocomplete needs the table list
+  // before there is a table name to complete.
+  $effect(() => {
+    if (profileName !== null) ensureTables(profileName);
+  });
+
+  // The lazy half of column completion: for every table this buffer already
+  // mentions — not only the ones expanded in the tree — kick off the fetch
+  // so completion has them cached the next time the human asks.
+  // ensureColumns is a no-op once a table is loading or loaded, so re-running
+  // this on every keystroke never duplicates a fetch.
+  $effect(() => {
+    if (profileName === null) return;
+    const profile = profileName;
+    for (const table of mentionedTables(sql, completionSchema?.tables ?? [])) {
+      const node = findTable(profile, table);
+      if (node !== null) ensureColumns(profile, node);
+    }
+  });
 
   // Where the caret is and what is selected under it, as CodeMirror last
   // reported. A fresh document starts at 0, which is where CodeMirror puts the
@@ -294,6 +332,37 @@
     const statement = target;
     if (!canRun || profileName === null) return;
     await execute(profileName, statement);
+  }
+
+  // Whether there is anything to pretty-print — same rule Save uses, since
+  // an empty (or whitespace-only) buffer has nothing a formatter could do.
+  let canFormat = $derived(sql.trim() !== "");
+
+  // Pretty-prints the whole document of the active tab, MySQL-flavoured,
+  // uppercase keywords. sql-formatter is loaded on first use rather than at
+  // startup — it is the one dependency this feature needed, and nothing else
+  // in the app wants it sitting in the launch bundle.
+  //
+  // The result goes back through writeSql, the same path typing takes, so
+  // it reaches SqlEditor as an ordinary `value` change: the editor's own
+  // sync effect dispatches it as one transaction, which is what makes a
+  // single Cmd-Z after Format restore exactly the text that was there
+  // before. Statement separators (`;`) are sql-formatter's to keep, and it
+  // does — a formatted multi-statement buffer still splits the same number
+  // of ways.
+  async function formatActive() {
+    if (!canFormat) return;
+    const { format } = await import("sql-formatter");
+    let formatted: string;
+    try {
+      formatted = format(sql, { language: "mysql", keywordCase: "upper" });
+    } catch {
+      // A buffer sql-formatter cannot parse (mid-edit, a dialect quirk it
+      // does not know) is left exactly as typed rather than replaced with
+      // nothing.
+      return;
+    }
+    if (formatted !== sql) writeSql(formatted);
   }
 
   // Runs the statement the Results pane is already showing again — what a
@@ -568,6 +637,17 @@
 
     <button
       type="button"
+      class="inline-flex h-8 shrink-0 items-center gap-2 rounded-control border border-border bg-surface-raised pr-2.5 pl-3.5 text-base font-medium text-text transition-colors hover:border-border-strong hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-40"
+      title="Format the document (Shift-Alt-F)"
+      disabled={!canFormat}
+      onclick={formatActive}
+    >
+      Format
+      <kbd class="rounded-sm bg-white/10 px-1 py-px font-sans text-xs text-text-subtle">⇧⌥F</kbd>
+    </button>
+
+    <button
+      type="button"
       class="inline-flex h-8 shrink-0 items-center gap-2 rounded-control bg-accent pr-2.5 pl-3.5 text-base font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-surface-raised disabled:text-text-subtle"
       disabled={!canRun}
       onclick={run}
@@ -781,9 +861,11 @@
           <SqlEditor
             value={sql}
             {highlight}
+            {completionSchema}
             onChange={handleSqlChange}
             onCursorChange={handleCursorChange}
             onRun={run}
+            onFormat={formatActive}
           />
         </div>
       </section>

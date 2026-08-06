@@ -22,22 +22,36 @@
   import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
   import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
   import { sql, MySQL } from "@codemirror/lang-sql";
+  import { autocompletion } from "@codemirror/autocomplete";
   import { tags } from "@lezer/highlight";
+  import { keywordCompletion, schemaCompletion, type CompletionSchema } from "./completion";
 
   let {
     value,
     highlight = null,
+    completionSchema = null,
     onChange,
     onCursorChange,
     onRun,
+    onFormat,
   }: {
     value: string;
     /** A range to tint, in code-unit offsets — the statement Run would send. */
     highlight?: { from: number; to: number } | null;
+    /** What EditorView knows about the connected Profile's schema, for table
+        and column completion — null while no Profile is selected, in which
+        case only keywords complete. Read fresh on every keystroke rather
+        than captured once (see completion.ts), so EditorView is free to
+        hand over a new object each render without this component having to
+        notice or reconfigure anything. */
+    completionSchema?: CompletionSchema | null;
     onChange: (value: string) => void;
     /** Where the caret is, and whatever is selected under it ("" when nothing is). */
     onCursorChange: (cursor: number, selection: string) => void;
     onRun: () => void;
+    /** Shift-Alt-F, the conventional "format document" binding — EditorView
+        owns what formatting means, this just relays the keystroke. */
+    onFormat?: () => void;
   } = $props();
 
   let container: HTMLDivElement;
@@ -104,9 +118,58 @@
       ".cm-cursor": {
         borderLeftColor: "var(--color-text)",
       },
+      // The completion popup — a panel like any other in the app (the same
+      // border, radius and shadow the Saved popover uses), not the browser's
+      // default white list. The selected row uses the overlay step, the same
+      // one hover/selected reaches for everywhere else.
+      ".cm-tooltip.cm-tooltip-autocomplete": {
+        backgroundColor: "var(--color-surface-panel)",
+        border: "1px solid var(--color-border)",
+        borderRadius: "var(--radius-panel)",
+        boxShadow: "var(--shadow-panel)",
+        overflow: "hidden",
+      },
+      ".cm-tooltip-autocomplete ul": {
+        fontFamily: "var(--font-mono)",
+        fontSize: "var(--text-base)",
+        maxHeight: "16em",
+      },
+      ".cm-tooltip-autocomplete ul li": {
+        padding: "0.25rem 0.5rem",
+        color: "var(--color-text)",
+      },
+      ".cm-tooltip-autocomplete ul li[aria-selected]": {
+        backgroundColor: "var(--color-surface-overlay)",
+        color: "var(--color-text)",
+      },
+      ".cm-completionMatchedText": {
+        color: "var(--color-accent)",
+        textDecoration: "none",
+        fontWeight: "600",
+      },
+      ".cm-completionDetail": {
+        color: "var(--color-text-subtle)",
+        fontStyle: "normal",
+      },
+      ".cm-completionIcon": {
+        color: "var(--color-text-subtle)",
+      },
     },
     { dark: true },
   );
+
+  // The autocomplete popup itself: our own two sources in place of the
+  // default (which would otherwise pull from every "autocomplete" language
+  // datum registered on the SQL language, duplicating the schema half) —
+  // keywords first, then tables/columns, matching where a human's eye goes
+  // looking for either. activateOnTyping is CodeMirror's default; the
+  // standard keybinding (Ctrl-Space, plus arrows/Enter/Escape to navigate,
+  // accept and dismiss) comes from autocompletion()'s own defaultKeymap and
+  // needs nothing added here — none of it touches Tab or Mod-Enter.
+  const completion = autocompletion({
+    activateOnTyping: true,
+    override: [keywordCompletion, schemaCompletion(() => completionSchema)],
+  });
 
   // Syntax colors, also from the tokens: keywords, strings, numbers and
   // comments are the only distinctions SQL actually needs to scan quickly.
@@ -156,8 +219,10 @@
           syntaxHighlighting(syntax),
           highlightField,
           theme,
+          completion,
           keymap.of([
             { key: "Mod-Enter", run: () => (onRun(), true) },
+            { key: "Shift-Alt-f", run: () => (onFormat?.(), true) },
             ...historyKeymap,
             ...defaultKeymap,
           ]),

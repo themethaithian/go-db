@@ -4,17 +4,26 @@
   // simply absent — this window answers "what can I browse right now", and
   // the Connections view is where a Profile becomes browsable.
   //
-  // Clicking a table's name is the point of the whole thing: it hands the
-  // workspace a SELECT to run, so browsing data costs one click and no typing.
-  // The caret is a separate control from the name for exactly that reason —
-  // expanding a table to read its columns must not run a query.
+  // Clicking a table's name is the point of the whole thing: it selects the
+  // table, and the Explorer shows its rows beside the tree. The caret is a
+  // separate control from the name for exactly that reason — expanding a
+  // table to read its columns must not change what is on screen to its right.
+  //
+  // A table can also be starred. Starred ("pinned") tables repeat in a PINNED
+  // group at the top of their Profile, which is the whole feature: during an
+  // investigation the two or three tables that matter stop being wherever the
+  // alphabet put them. The pin is a shortcut, not a move — the table keeps its
+  // place in the full list, starred there too.
   //
   // All schema state (what is loaded, what is expanded, what is selected)
-  // lives in schema.svelte.ts at module scope; this component only renders it.
+  // lives in schema.svelte.ts and the pins in pins.svelte.ts, both at module
+  // scope; this component only renders them.
+  import { isPinned, pinnedAmong, togglePin } from "./pins.svelte";
   import {
     profileNode,
     refreshAll,
     selected,
+    selectTable,
     syncProfiles,
     toggleProfile,
     toggleTable,
@@ -24,12 +33,10 @@
   let {
     connectedProfiles,
     width,
-    onOpenTable,
     onGoToConnections,
   }: {
     connectedProfiles: string[];
     width: number;
-    onOpenTable: (profileName: string, table: string) => void;
     onGoToConnections: () => void;
   } = $props();
 
@@ -55,13 +62,105 @@
   function isSelected(profileName: string, table: TableNode): boolean {
     return selected.profile === profileName && selected.table === table.name;
   }
-
-  function openTable(profileName: string, table: TableNode) {
-    selected.profile = profileName;
-    selected.table = table.name;
-    onOpenTable(profileName, table.name);
-  }
 </script>
+
+<!--
+  The star, rendered the same in both groups: filled and warm when pinned, and
+  otherwise only there while the pointer (or the keyboard focus) is on the row,
+  so an unpinned tree stays a list of table names.
+-->
+{#snippet star(profileName: string, tableName: string)}
+  {@const pinned = isPinned(profileName, tableName)}
+  <button
+    type="button"
+    class="flex h-6 w-5 shrink-0 items-center justify-center transition-colors {pinned
+      ? 'text-warning hover:text-text'
+      : 'text-text-subtle opacity-0 group-hover:opacity-100 hover:text-text focus-visible:opacity-100'}"
+    onclick={() => togglePin(profileName, tableName)}
+    aria-pressed={pinned}
+    title={pinned ? `Unpin ${tableName}` : `Pin ${tableName} to the top`}
+    aria-label={pinned ? `Unpin ${tableName}` : `Pin ${tableName} to the top`}
+  >
+    <svg
+      class="h-3.5 w-3.5"
+      viewBox="0 0 16 16"
+      fill={pinned ? "currentColor" : "none"}
+      stroke="currentColor"
+      stroke-width="1.3"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 2.4l1.72 3.49 3.85.56-2.79 2.71.66 3.84L8 11.19l-3.44 1.81.66-3.84-2.79-2.71 3.85-.56z" />
+    </svg>
+  </button>
+{/snippet}
+
+<!-- One table row: the caret is optional because the PINNED group is a list of
+     shortcuts, not a second place to expand the same table's columns. -->
+{#snippet tableRow(profileName: string, table: TableNode, caret: boolean)}
+  <div
+    class="group flex items-center border-l-2 pr-2 transition-colors {caret
+      ? 'pl-5'
+      : 'pl-8'} {isSelected(profileName, table)
+      ? 'border-accent bg-surface-overlay'
+      : 'border-transparent hover:bg-surface-raised'}"
+  >
+    {#if caret}
+      <button
+        type="button"
+        class="flex h-6 w-4 shrink-0 items-center justify-center text-text-subtle transition-colors hover:text-text"
+        onclick={() => toggleTable(profileName, table)}
+        aria-label={table.expanded
+          ? `Collapse columns of ${table.name}`
+          : `Show columns of ${table.name}`}
+        aria-expanded={table.expanded}
+      >
+        <svg
+          class="h-3 w-3 transition-transform {table.expanded ? 'rotate-90' : ''}"
+          viewBox="0 0 12 12"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M4.5 2.5 8 6l-3.5 3.5" />
+        </svg>
+      </button>
+    {/if}
+    <button
+      type="button"
+      class="flex h-6 min-w-0 flex-1 items-center gap-1.5 text-left"
+      onclick={() => selectTable(profileName, table.name)}
+      title="Browse {table.name}"
+    >
+      <svg
+        class="h-3.5 w-3.5 shrink-0 text-text-subtle"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.3"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="2.25" y="3.25" width="11.5" height="9.5" rx="1.25" />
+        <path d="M2.25 6.5h11.5M6.25 6.5v6.25" />
+      </svg>
+      <span class="truncate text-base text-text">{table.name}</span>
+      {#if table.rowEstimate !== null}
+        <span
+          class="ml-auto shrink-0 text-xs tabular-nums text-text-subtle"
+          title="Approximate row count"
+        >
+          {rowEstimateLabel(table.rowEstimate)}
+        </span>
+      {/if}
+    </button>
+    {@render star(profileName, table.name)}
+  </div>
+{/snippet}
 
 <aside
   class="flex shrink-0 flex-col overflow-hidden bg-surface-panel"
@@ -165,67 +264,21 @@
           {:else if node.tables !== null && node.tables.length === 0}
             <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">No tables in this schema.</p>
           {:else if node.tables !== null}
-            {#each node.tables as table (table.name)}
-              <div
-                class="flex items-center border-l-2 pr-2 pl-5 transition-colors {isSelected(
-                  profileName,
-                  table,
-                )
-                  ? 'border-accent bg-surface-overlay'
-                  : 'border-transparent hover:bg-surface-raised'}"
+            {@const pinned = pinnedAmong(profileName, node.tables)}
+            {#if pinned.length > 0}
+              <p
+                class="flex h-6 items-center pr-3 pl-8 text-xs font-medium tracking-wide text-text-subtle uppercase"
               >
-                <button
-                  type="button"
-                  class="flex h-6 w-4 shrink-0 items-center justify-center text-text-subtle transition-colors hover:text-text"
-                  onclick={() => toggleTable(profileName, table)}
-                  aria-label={table.expanded
-                    ? `Collapse columns of ${table.name}`
-                    : `Show columns of ${table.name}`}
-                  aria-expanded={table.expanded}
-                >
-                  <svg
-                    class="h-3 w-3 transition-transform {table.expanded ? 'rotate-90' : ''}"
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M4.5 2.5 8 6l-3.5 3.5" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  class="flex h-6 min-w-0 flex-1 items-center gap-1.5 text-left"
-                  onclick={() => openTable(profileName, table)}
-                  title="Browse {table.name}"
-                >
-                  <svg
-                    class="h-3.5 w-3.5 shrink-0 text-text-subtle"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.3"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <rect x="2.25" y="3.25" width="11.5" height="9.5" rx="1.25" />
-                    <path d="M2.25 6.5h11.5M6.25 6.5v6.25" />
-                  </svg>
-                  <span class="truncate text-base text-text">{table.name}</span>
-                  {#if table.rowEstimate !== null}
-                    <span
-                      class="ml-auto shrink-0 text-xs tabular-nums text-text-subtle"
-                      title="Approximate row count"
-                    >
-                      {rowEstimateLabel(table.rowEstimate)}
-                    </span>
-                  {/if}
-                </button>
-              </div>
+                Pinned
+              </p>
+              {#each pinned as table (table.name)}
+                {@render tableRow(profileName, table, false)}
+              {/each}
+              <div class="mx-4 my-1 border-t border-border"></div>
+            {/if}
+
+            {#each node.tables as table (table.name)}
+              {@render tableRow(profileName, table, true)}
 
               {#if table.expanded}
                 {#if table.loading}

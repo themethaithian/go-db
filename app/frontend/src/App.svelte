@@ -1,16 +1,18 @@
 <script lang="ts">
-  // App shell: view switching between the Connections manager (issues #5/#6)
-  // and the Editor (issue #7), plus the status bar. Owns connectedProfiles —
-  // the one piece of state both views need — and refreshes it on entry to
-  // the Editor view so a Profile connected moments ago shows up there.
+  // App shell: view switching between the Connections manager (issues #5/#6),
+  // the Explorer (#17), the Editor (#7) and the Approval Console, plus the
+  // status bar. Owns connectedProfiles — the one piece of state every view
+  // needs — and refreshes it on entry to a view that queries, so a Profile
+  // connected moments ago shows up there.
   import { onMount } from "svelte";
   import ConnectionsView from "./lib/ConnectionsView.svelte";
+  import ExplorerView from "./lib/ExplorerView.svelte";
   import EditorView from "./lib/EditorView.svelte";
   import ApprovalConsole from "./lib/ApprovalConsole.svelte";
   import { ConnectedProfiles, ListPendingApprovals, MemoryUsageMB, Ready } from "../wailsjs/go/app/App";
   import type { guard } from "../wailsjs/go/models";
 
-  type View = "connections" | "editor" | "approvals";
+  type View = "connections" | "explorer" | "editor" | "approvals";
 
   // Poll interval for the Approval Console: how often App.svelte refreshes
   // pendingApprovals so the nav badge stays live from every view.
@@ -30,6 +32,12 @@
   let connectedProfiles = $state<string[]>([]);
   let pendingApprovals = $state<guard.Waiting[]>([]);
   let memoryMB = $state<number | null>(null);
+
+  // A statement in transit from the Explorer to the Editor — the Explorer's
+  // "Open in editor" is the one way a view hands work to another, so the
+  // handover is a single value passed here and taken exactly once, rather
+  // than a shared editor document two views could fight over.
+  let editorSeed = $state<{ profile: string; sql: string } | null>(null);
 
   let statusText = $derived(
     connectedProfiles.length === 0
@@ -66,10 +74,37 @@
 
   function switchView(next: View) {
     view = next;
-    if (next === "editor") refreshConnections();
+    if (next === "explorer" || next === "editor") refreshConnections();
     if (next === "approvals") refreshApprovals();
   }
+
+  function openInEditor(profile: string, sql: string) {
+    editorSeed = { profile, sql };
+    switchView("editor");
+  }
 </script>
+
+<!-- One nav item. The Approvals badge is part of it because the count belongs
+     on the tab that leads to the queue, from wherever you are. -->
+{#snippet navItem(label: string, target: View)}
+  <button
+    type="button"
+    class="flex items-center gap-1.5 rounded-control px-3 py-1 font-medium transition-colors {view ===
+    target
+      ? 'bg-accent text-white'
+      : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
+    onclick={() => switchView(target)}
+  >
+    {label}
+    {#if target === "approvals" && pendingApprovals.length > 0}
+      <span
+        class="flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-xs leading-none font-semibold tabular-nums text-white"
+      >
+        {pendingApprovals.length}
+      </span>
+    {/if}
+  </button>
+{/snippet}
 
 <div class="flex h-screen w-screen flex-col bg-surface font-sans text-base text-text">
   <header class="flex h-11 shrink-0 items-center gap-5 border-b border-border bg-surface-panel px-3">
@@ -92,49 +127,29 @@
     </span>
 
     <nav class="flex items-center gap-0.5 rounded-control border border-border bg-surface p-0.5 text-sm">
-      <button
-        type="button"
-        class="rounded-control px-3 py-1 font-medium transition-colors {view === 'connections'
-          ? 'bg-accent text-white'
-          : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
-        onclick={() => switchView("connections")}
-      >
-        Connections
-      </button>
-      <button
-        type="button"
-        class="rounded-control px-3 py-1 font-medium transition-colors {view === 'editor'
-          ? 'bg-accent text-white'
-          : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
-        onclick={() => switchView("editor")}
-      >
-        Editor
-      </button>
-      <button
-        type="button"
-        class="flex items-center gap-1.5 rounded-control px-3 py-1 font-medium transition-colors {view ===
-        'approvals'
-          ? 'bg-accent text-white'
-          : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
-        onclick={() => switchView("approvals")}
-      >
-        Approvals
-        {#if pendingApprovals.length > 0}
-          <span
-            class="flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-xs leading-none font-semibold tabular-nums text-white"
-          >
-            {pendingApprovals.length}
-          </span>
-        {/if}
-      </button>
+      {@render navItem("Connections", "connections")}
+      {@render navItem("Explorer", "explorer")}
+      {@render navItem("Editor", "editor")}
+      {@render navItem("Approvals", "approvals")}
     </nav>
   </header>
 
   <div class="flex flex-1 overflow-hidden">
     {#if view === "connections"}
       <ConnectionsView onConnectionsChanged={refreshConnections} />
+    {:else if view === "explorer"}
+      <ExplorerView
+        {connectedProfiles}
+        onGoToConnections={() => switchView("connections")}
+        onOpenInEditor={openInEditor}
+      />
     {:else if view === "editor"}
-      <EditorView {connectedProfiles} onGoToConnections={() => switchView("connections")} />
+      <EditorView
+        {connectedProfiles}
+        seed={editorSeed}
+        onSeedConsumed={() => (editorSeed = null)}
+        onGoToConnections={() => switchView("connections")}
+      />
     {:else}
       <ApprovalConsole entries={pendingApprovals} onRefresh={refreshApprovals} />
     {/if}

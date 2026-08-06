@@ -36,7 +36,12 @@ export type ProfileNode = {
 
 const nodes = $state<Record<string, ProfileNode>>({});
 
-/** Which table row is currently selected, so the tree can show it as such. */
+/**
+ * The table the human is looking at: the row the tree highlights, and the one
+ * the Explorer's data panel shows. It lives here, next to the tree it belongs
+ * to, precisely so those two can never disagree — there is one selection, and
+ * both the highlight and the fetch read it.
+ */
 export const selected = $state<{
   profile: string | null;
   table: string | null;
@@ -44,6 +49,12 @@ export const selected = $state<{
   profile: null,
   table: null,
 });
+
+/** Makes this Profile's table the selected one. */
+export function selectTable(profileName: string, table: string) {
+  selected.profile = profileName;
+  selected.table = table;
+}
 
 function fresh(): ProfileNode {
   return { expanded: false, loading: false, tables: null, error: null };

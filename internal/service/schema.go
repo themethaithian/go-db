@@ -72,6 +72,28 @@ type ColumnList struct {
 // OK reports whether the columns were listed.
 func (r ColumnList) OK() bool { return r.Status == SchemaOK }
 
+// IndexInfo describes one index on a table, for the Database tree's expanded
+// view of it. Columns is in the index's own seq_in_index order — the order
+// that determines which leftmost-prefix queries the index can serve — not
+// alphabetical.
+type IndexInfo struct {
+	Name    string   `json:"name"`
+	Columns []string `json:"columns"`
+	Unique  bool     `json:"unique"`
+	Primary bool     `json:"primary"`
+}
+
+// IndexList is the result of ListIndexes, in the same shape as TableList and
+// ColumnList.
+type IndexList struct {
+	Status  SchemaStatus `json:"status"`
+	Message string       `json:"message"`
+	Indexes []IndexInfo  `json:"indexes,omitempty"`
+}
+
+// OK reports whether the indexes were listed.
+func (r IndexList) OK() bool { return r.Status == SchemaOK }
+
 // ListTables returns the tables in the named Profile's schema, ordered by
 // name, for the Database tree.
 //
@@ -141,6 +163,56 @@ func (s *AppService) ListColumns(ctx context.Context, profileName, table string)
 	return ColumnList{Status: SchemaOK, Message: columnSummary(len(columns), table), Columns: columns}
 }
 
+// ListIndexes returns the indexes on table in the named Profile's schema,
+// ordered by index name with each index's columns in seq_in_index order, for
+// the Database tree's expanded view of a table.
+//
+// information_schema.statistics reports one row per (index, column) pair, so
+// this groups rows by index_name as it walks them — safe only because the
+// query orders by index_name first, keeping every index's rows contiguous.
+// PRIMARY is MySQL's own reserved name for the primary key index, so Primary
+// is set by name rather than by inspecting constraints separately; Unique
+// reflects non_unique = 0, MySQL's own (inverted) unique flag.
+//
+// table is escaped exactly as ListColumns escapes it: never spliced in as-is,
+// always an escaped SQL string literal. A table that does not exist, or that
+// belongs to another schema, is not an error: it simply has no indexes, and
+// ListIndexes reports SchemaOK with an empty Indexes.
+func (s *AppService) ListIndexes(ctx context.Context, profileName, table string) IndexList {
+	conn, err := s.registry.Conn(profileName)
+	if err != nil {
+		return IndexList{Status: SchemaNotConnected, Message: schemaNotConnectedMessage(profileName)}
+	}
+
+	sql := fmt.Sprintf(
+		"SELECT index_name, column_name, non_unique FROM information_schema.statistics "+
+			"WHERE table_schema = DATABASE() AND table_name = %s ORDER BY index_name, seq_in_index",
+		sqlStringLiteral(table),
+	)
+	rows, err := conn.ReadQuery(ctx, sql)
+	if err != nil {
+		return IndexList{Status: SchemaFailed, Message: oneLine(err)}
+	}
+
+	indexes := make([]IndexInfo, 0)
+	positions := make(map[string]int, len(rows.Rows))
+	for _, row := range rows.Rows {
+		name := columnValue(row, 0)
+		i, seen := positions[name]
+		if !seen {
+			indexes = append(indexes, IndexInfo{
+				Name:    name,
+				Unique:  columnValue(row, 2) == "0",
+				Primary: name == "PRIMARY",
+			})
+			i = len(indexes) - 1
+			positions[name] = i
+		}
+		indexes[i].Columns = append(indexes[i].Columns, columnValue(row, 1))
+	}
+	return IndexList{Status: SchemaOK, Message: indexSummary(len(indexes), table), Indexes: indexes}
+}
+
 // sqlStringLiteral renders s as a single-quoted SQL string literal, doubling
 // any single quote it contains — the standard SQL escape, and the one MySQL
 // itself uses outside NO_BACKSLASH_ESCAPES-sensitive contexts. table came from
@@ -196,5 +268,16 @@ func columnSummary(n int, table string) string {
 		return fmt.Sprintf("1 column in %q.", table)
 	default:
 		return fmt.Sprintf("%d columns in %q.", n, table)
+	}
+}
+
+func indexSummary(n int, table string) string {
+	switch n {
+	case 0:
+		return fmt.Sprintf("Table %q has no indexes, or does not exist.", table)
+	case 1:
+		return fmt.Sprintf("1 index on %q.", table)
+	default:
+		return fmt.Sprintf("%d indexes on %q.", n, table)
 	}
 }

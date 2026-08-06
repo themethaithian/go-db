@@ -34,9 +34,22 @@
     TREE_MAX_PX,
     TREE_MIN_PX,
   } from "./layout.svelte";
-  import { browse, BROWSE_LIMITS, selected } from "./schema.svelte";
+  import StructureView from "./StructureView.svelte";
+  import {
+    browse,
+    BROWSE_LIMITS,
+    ensureColumns,
+    ensureIndexes,
+    findTable,
+    refreshTableStructure,
+    selected,
+    type TableNode,
+  } from "./schema.svelte";
   import { CancelPending, RunQuery } from "../../wailsjs/go/app/App";
   import type { service } from "../../wailsjs/go/models";
+
+  /** Data shows the grid; Structure shows the table's columns and indexes. */
+  type PanelMode = "data" | "structure";
 
   let {
     connectedProfiles,
@@ -70,6 +83,12 @@
   // result set it was not taken from.
   let selectedRow = $state<number | null>(null);
 
+  // Data shows the grid and its WHERE/LIMIT controls; Structure shows the
+  // table's columns and indexes instead. It is not scoped by table the way
+  // browse.filter is — there is nothing to preserve, so every table starts
+  // on Data rather than remembering the last mode picked for it.
+  let mode = $state<PanelMode>("data");
+
   // Width of the grid + Row pane strip, so the splitter between them knows
   // how far it may travel before one of the two is squeezed out.
   let bodyWidth = $state(0);
@@ -93,6 +112,41 @@
   let detailMax = $derived(
     Math.max(DETAIL_MIN_PX, bodyWidth - GRID_MIN_PX - SPLITTER_PX),
   );
+
+  // The tree's own node for the selected table — the schema cache the
+  // Structure view reads and refreshes, shared with the Database tree so the
+  // two can never disagree about a table's columns. Resolvable as soon as a
+  // table is selected: selecting one requires clicking it in the tree, which
+  // requires its Profile's table list — and so this table's node — to
+  // already be loaded.
+  let tableNode: TableNode | null = $derived(
+    selected.profile === null || selected.table === null
+      ? null
+      : findTable(selected.profile, selected.table),
+  );
+  let structureLoading = $derived(
+    tableNode !== null && (tableNode.loading || tableNode.indexesLoading),
+  );
+
+  // Every table starts on Data — a table switch is a strong enough signal
+  // that a mode picked for the last one should not carry over.
+  $effect(() => {
+    selected.table;
+    mode = "data";
+  });
+
+  // The Structure view's own fetch: on entering Structure for a table whose
+  // columns or indexes are not cached yet, ask for them. ensureColumns and
+  // ensureIndexes are the same no-op-if-cached calls the tree's toggleTable
+  // makes, so flipping between Data and Structure never re-asks the database.
+  $effect(() => {
+    if (mode !== "structure") return;
+    const profileName = selected.profile;
+    const node = tableNode;
+    if (profileName === null || node === null) return;
+    ensureColumns(profileName, node);
+    ensureIndexes(profileName, node);
+  });
 
   // The statement is the whole input to this view: whenever it changes — a
   // table picked in the tree, a condition applied, a limit chosen, or a
@@ -179,7 +233,12 @@
   }
 
   function refresh() {
-    if (selected.profile === null || browseSql === "") return;
+    if (selected.profile === null) return;
+    if (mode === "structure") {
+      if (tableNode !== null) refreshTableStructure(selected.profile, tableNode);
+      return;
+    }
+    if (browseSql === "") return;
     void fetchRows(selected.profile, browseSql);
   }
 
@@ -277,15 +336,47 @@
         >
           {selected.profile}
         </span>
-        {#if loading}
-          <span class="shrink-0 text-sm text-text-subtle">loading…</span>
-        {:else if rowCount !== null}
-          <span class="shrink-0 text-sm tabular-nums text-text-muted">
-            {rowCount === 1 ? "1 row" : `${rowCount.toLocaleString()} rows`}
-          </span>
+        {#if mode === "data"}
+          {#if loading}
+            <span class="shrink-0 text-sm text-text-subtle">loading…</span>
+          {:else if rowCount !== null}
+            <span class="shrink-0 text-sm tabular-nums text-text-muted">
+              {rowCount === 1 ? "1 row" : `${rowCount.toLocaleString()} rows`}
+            </span>
+          {/if}
         {/if}
 
         <div class="flex-1"></div>
+
+        <!-- The Data | Structure toggle, in the app's own pill/tab language
+             (App.svelte's nav bar): a bordered strip, the active side filled
+             with the accent, the other muted until hovered. -->
+        <div
+          class="flex h-8 shrink-0 items-center gap-0.5 rounded-control border border-border bg-surface p-0.5 text-sm"
+          role="group"
+          aria-label="Data or Structure"
+        >
+          <button
+            type="button"
+            class="rounded-control px-2.5 py-1 font-medium transition-colors {mode === 'data'
+              ? 'bg-accent text-white'
+              : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
+            aria-pressed={mode === "data"}
+            onclick={() => (mode = "data")}
+          >
+            Data
+          </button>
+          <button
+            type="button"
+            class="rounded-control px-2.5 py-1 font-medium transition-colors {mode === 'structure'
+              ? 'bg-accent text-white'
+              : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
+            aria-pressed={mode === "structure"}
+            onclick={() => (mode = "structure")}
+          >
+            Structure
+          </button>
+        </div>
 
         <button
           type="button"
@@ -312,7 +403,7 @@
           type="button"
           class="flex h-8 w-8 shrink-0 items-center justify-center rounded-control border border-border bg-surface-raised text-text-muted transition-colors hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:text-text-subtle"
           onclick={refresh}
-          disabled={loading}
+          disabled={mode === "data" ? loading : structureLoading}
           title="Run the query again"
           aria-label="Run the query again"
         >
@@ -337,7 +428,7 @@
       <section
         class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel"
       >
-        {#if selected.table !== null}
+        {#if selected.table !== null && mode === "data"}
           <div class="flex h-11 shrink-0 items-center gap-3 border-b border-border px-3">
             <div
               class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-control border border-border bg-surface px-2.5 transition-colors focus-within:border-accent hover:border-border-strong"
@@ -418,7 +509,9 @@
         {/if}
 
         <div class="flex h-8 shrink-0 items-center justify-between gap-3 border-b border-border px-3">
-          {#if shownSql === ""}
+          {#if mode === "structure"}
+            <span class="text-xs font-medium tracking-wide text-text-subtle uppercase">Structure</span>
+          {:else if shownSql === ""}
             <span class="text-xs font-medium tracking-wide text-text-subtle uppercase">Data</span>
           {:else}
             <span class="truncate font-mono text-xs text-text-subtle" title={shownSql}>
@@ -435,7 +528,9 @@
           {/if}
         </div>
 
-        {#if selected.table === null}
+        {#if mode === "structure" && selected.table !== null}
+          <StructureView node={tableNode} />
+        {:else if selected.table === null}
           <div class="m-auto flex max-w-xs flex-col items-center gap-2 px-6 py-8 text-center">
             <svg
               class="h-5 w-5 text-text-subtle"

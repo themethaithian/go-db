@@ -144,6 +144,80 @@ func TestIntegrationListColumnsEscapesAQuotedTableName(t *testing.T) {
 	}
 }
 
+// TestIntegrationListIndexesReturnsIndexMetadata proves what real MySQL
+// reports for information_schema.statistics against a table carrying three
+// kinds of index: a single-column primary key, a composite unique index (two
+// columns, in declaration order), and a plain non-unique secondary index.
+func TestIntegrationListIndexesReturnsIndexMetadata(t *testing.T) {
+	host, port := requireMySQL(t)
+	pool := adminPool(t, host, port)
+	seed(t, pool, "schema_accounts",
+		`CREATE TABLE schema_accounts (
+			id INT PRIMARY KEY,
+			org_id INT NOT NULL,
+			email VARCHAR(255) NOT NULL,
+			display_name VARCHAR(255) NOT NULL,
+			UNIQUE INDEX idx_org_email (org_id, email),
+			INDEX idx_display_name (display_name)
+		)`,
+	)
+	svc := connectedFacade(t, host, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	got := svc.ListIndexes(ctx, "local", "schema_accounts")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+
+	byName := make(map[string]service.IndexInfo, len(got.Indexes))
+	for _, idx := range got.Indexes {
+		byName[idx.Name] = idx
+	}
+
+	primary, ok := byName["PRIMARY"]
+	if !ok {
+		t.Fatalf("ListIndexes did not report PRIMARY; got %+v", got.Indexes)
+	}
+	if !primary.Primary || !primary.Unique || len(primary.Columns) != 1 || primary.Columns[0] != "id" {
+		t.Errorf("PRIMARY = %+v, want {Primary:true Unique:true Columns:[id]}", primary)
+	}
+
+	orgEmail, ok := byName["idx_org_email"]
+	if !ok {
+		t.Fatalf("ListIndexes did not report idx_org_email; got %+v", got.Indexes)
+	}
+	if orgEmail.Primary || !orgEmail.Unique {
+		t.Errorf("idx_org_email = %+v, want {Primary:false Unique:true}", orgEmail)
+	}
+	if len(orgEmail.Columns) != 2 || orgEmail.Columns[0] != "org_id" || orgEmail.Columns[1] != "email" {
+		t.Errorf("idx_org_email.Columns = %v, want [org_id email] in declaration order", orgEmail.Columns)
+	}
+
+	displayName, ok := byName["idx_display_name"]
+	if !ok {
+		t.Fatalf("ListIndexes did not report idx_display_name; got %+v", got.Indexes)
+	}
+	if displayName.Primary || displayName.Unique {
+		t.Errorf("idx_display_name = %+v, want {Primary:false Unique:false}", displayName)
+	}
+	if len(displayName.Columns) != 1 || displayName.Columns[0] != "display_name" {
+		t.Errorf("idx_display_name.Columns = %v, want [display_name]", displayName.Columns)
+	}
+}
+
+func TestIntegrationListIndexesOnAProfileThatIsNotConnected(t *testing.T) {
+	svc := newMySQLFacade(t)
+
+	got := svc.ListIndexes(context.Background(), "never-connected", "users")
+
+	if got.Status != service.SchemaNotConnected {
+		t.Errorf("status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
+	}
+}
+
 func TestIntegrationListTablesOnAProfileThatIsNotConnected(t *testing.T) {
 	svc := newMySQLFacade(t)
 

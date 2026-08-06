@@ -223,3 +223,153 @@ func TestListColumnsReportsADatabaseFailure(t *testing.T) {
 		t.Errorf("message = %q, want the database's own wording kept", got.Message)
 	}
 }
+
+// TestListIndexesGroupsACompositeIndexByColumnOrder is the requirement that
+// information_schema.statistics's one-row-per-column rows are folded back into
+// one IndexInfo per index, with Columns kept in seq_in_index order — the order
+// that determines which leftmost-prefix queries the index can serve.
+func TestListIndexesGroupsACompositeIndexByColumnOrder(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"index_name", "column_name", "non_unique"},
+		Rows: [][]*string{
+			{str("PRIMARY"), str("id"), str("0")},
+			{str("idx_name_email"), str("last_name"), str("1")},
+			{str("idx_name_email"), str("email"), str("1")},
+		},
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListIndexes(context.Background(), "local", "users")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+	if len(got.Indexes) != 2 {
+		t.Fatalf("got %d indexes, want 2: %+v", len(got.Indexes), got.Indexes)
+	}
+
+	want := []service.IndexInfo{
+		{Name: "PRIMARY", Columns: []string{"id"}, Unique: true, Primary: true},
+		{Name: "idx_name_email", Columns: []string{"last_name", "email"}, Unique: false, Primary: false},
+	}
+	for i, w := range want {
+		if got.Indexes[i].Name != w.Name ||
+			got.Indexes[i].Unique != w.Unique ||
+			got.Indexes[i].Primary != w.Primary ||
+			len(got.Indexes[i].Columns) != len(w.Columns) {
+			t.Errorf("Indexes[%d] = %+v, want %+v", i, got.Indexes[i], w)
+			continue
+		}
+		for j, col := range w.Columns {
+			if got.Indexes[i].Columns[j] != col {
+				t.Errorf("Indexes[%d].Columns[%d] = %q, want %q", i, j, got.Indexes[i].Columns[j], col)
+			}
+		}
+	}
+}
+
+func TestListIndexesReportsAPlainSecondaryIndexAsNonUniqueNonPrimary(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"index_name", "column_name", "non_unique"},
+		Rows: [][]*string{
+			{str("idx_author"), str("author_id"), str("1")},
+		},
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListIndexes(context.Background(), "local", "articles")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+	if len(got.Indexes) != 1 {
+		t.Fatalf("got %d indexes, want 1: %+v", len(got.Indexes), got.Indexes)
+	}
+	want := service.IndexInfo{Name: "idx_author", Columns: []string{"author_id"}, Unique: false, Primary: false}
+	got0 := got.Indexes[0]
+	if got0.Name != want.Name || got0.Unique != want.Unique || got0.Primary != want.Primary ||
+		len(got0.Columns) != 1 || got0.Columns[0] != "author_id" {
+		t.Errorf("Indexes[0] = %+v, want %+v", got0, want)
+	}
+}
+
+// TestListIndexesEscapesTheTableName mirrors
+// TestListColumnsEscapesTheTableName: table must never reach the database by
+// string concatenation.
+func TestListIndexesEscapesTheTableName(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"index_name", "column_name", "non_unique"},
+		Rows:    [][]*string{{str("PRIMARY"), str("id"), str("0")}},
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListIndexes(context.Background(), "local", "o'brien")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+
+	const want = "SELECT index_name, column_name, non_unique FROM information_schema.statistics " +
+		"WHERE table_schema = DATABASE() AND table_name = 'o''brien' ORDER BY index_name, seq_in_index"
+	queries := driver.Queries("local")
+	if len(queries) != 1 {
+		t.Fatalf("got %d queries, want 1", len(queries))
+	}
+	if queries[0] != want {
+		t.Errorf("query = %q, want exactly %q", queries[0], want)
+	}
+}
+
+func TestListIndexesOfAnUnknownTableIsEmptyNotAnError(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"index_name", "column_name", "non_unique"},
+		Rows:    nil,
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListIndexes(context.Background(), "local", "does_not_exist")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+	if len(got.Indexes) != 0 {
+		t.Errorf("Indexes = %v, want empty for an unknown table", got.Indexes)
+	}
+}
+
+func TestListIndexesOnAProfileThatIsNotConnected(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	svc := newConnectedFacade(t, dbtest.NewFakeKeychain(), driver)
+	mustSave(t, svc, localProfile("local"), "s3cret")
+
+	got := svc.ListIndexes(context.Background(), "local", "users")
+
+	if got.Status != service.SchemaNotConnected {
+		t.Errorf("status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
+	}
+	if !strings.Contains(got.Message, "local") {
+		t.Errorf("message %q does not name the Profile", got.Message)
+	}
+	if got.Indexes != nil {
+		t.Errorf("Indexes = %v, want nil when not connected", got.Indexes)
+	}
+}
+
+func TestListIndexesReportsADatabaseFailure(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.FailQuery("local", errors.New("db: Unknown database 'app'"))
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListIndexes(context.Background(), "local", "users")
+
+	if got.Status != service.SchemaFailed {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaFailed, got.Message)
+	}
+	if !strings.Contains(got.Message, "Unknown database") {
+		t.Errorf("message = %q, want the database's own wording kept", got.Message)
+	}
+}

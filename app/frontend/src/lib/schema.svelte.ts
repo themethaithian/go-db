@@ -7,14 +7,21 @@
 //
 // Caching is per Profile and lasts until refresh: tables are fetched the
 // first time a Profile is expanded, a table's columns the first time that
-// table is expanded, and neither is fetched again until the human presses
-// refresh or the Profile disconnects. A schema is not something that changes
-// under you often enough to justify re-asking the database on every click.
+// table is expanded (or the first time the Explorer's Structure view asks
+// for them), and neither is fetched again until the human presses refresh or
+// the Profile disconnects. A schema is not something that changes under you
+// often enough to justify re-asking the database on every click.
+//
+// Indexes ride the same cache and the same rule, one step behind: nothing
+// fetches them until something asks (today, only the Structure view does —
+// the tree has no index row to expand), but once fetched they live on the
+// TableNode exactly like columns do, so switching the Structure view away
+// from a table and back does not re-ask the database.
 
-import { ListColumns, ListTables } from "../../wailsjs/go/app/App";
+import { ListColumns, ListIndexes, ListTables } from "../../wailsjs/go/app/App";
 import type { service } from "../../wailsjs/go/models";
 
-/** One table under a Profile, plus its lazily loaded columns. */
+/** One table under a Profile, plus its lazily loaded columns and indexes. */
 export type TableNode = {
   name: string;
   rowEstimate: number | null;
@@ -23,6 +30,10 @@ export type TableNode = {
   /** null until the columns have been fetched at least once. */
   columns: service.ColumnInfo[] | null;
   error: string | null;
+  indexesLoading: boolean;
+  /** null until the indexes have been fetched at least once. */
+  indexes: service.IndexInfo[] | null;
+  indexesError: string | null;
 };
 
 /** One connected Profile — a root of the tree. */
@@ -152,9 +163,47 @@ export function refreshAll() {
 /** Expands or collapses a table, loading its columns the first time. */
 export function toggleTable(profileName: string, table: TableNode) {
   table.expanded = !table.expanded;
-  if (table.expanded && table.columns === null && !table.loading) {
-    void loadColumns(profileName, table);
-  }
+  if (table.expanded) ensureColumns(profileName, table);
+}
+
+/**
+ * Finds the tree node for table under profileName, if the tree has fetched
+ * that far — null before the Profile's tables have loaded, or if no table by
+ * that name exists. The Explorer's Structure view uses this to reach the same
+ * cache the tree populates, rather than keeping a second copy of it.
+ */
+export function findTable(profileName: string, table: string): TableNode | null {
+  const tables = nodes[profileName]?.tables;
+  if (tables == null) return null;
+  return tables.find((t) => t.name === table) ?? null;
+}
+
+/**
+ * Loads table's columns into the cache if nothing has fetched them yet — safe
+ * to call whether or not the table's tree row is expanded, so the Structure
+ * view can ask for columns without touching that unrelated UI state.
+ */
+export function ensureColumns(profileName: string, table: TableNode) {
+  if (table.columns === null && !table.loading) void loadColumns(profileName, table);
+}
+
+/** The same as ensureColumns, for the indexes half of the cache. */
+export function ensureIndexes(profileName: string, table: TableNode) {
+  if (table.indexes === null && !table.indexesLoading) void loadIndexes(profileName, table);
+}
+
+/**
+ * Forces a fresh fetch of table's columns and indexes, discarding whatever is
+ * cached — the Structure view's refresh, the same "look again" contract
+ * refreshAll gives the tree.
+ */
+export function refreshTableStructure(profileName: string, table: TableNode) {
+  table.columns = null;
+  table.error = null;
+  table.indexes = null;
+  table.indexesError = null;
+  void loadColumns(profileName, table);
+  void loadIndexes(profileName, table);
 }
 
 async function loadTables(profileName: string, reExpand: Set<string> = new Set()) {
@@ -175,6 +224,9 @@ async function loadTables(profileName: string, reExpand: Set<string> = new Set()
       loading: false,
       columns: null,
       error: null,
+      indexesLoading: false,
+      indexes: null,
+      indexesError: null,
     }));
     for (const table of node.tables) {
       if (table.expanded) void loadColumns(profileName, table);
@@ -203,5 +255,24 @@ async function loadColumns(profileName: string, table: TableNode) {
     table.columns = null;
   } finally {
     table.loading = false;
+  }
+}
+
+async function loadIndexes(profileName: string, table: TableNode) {
+  table.indexesLoading = true;
+  table.indexesError = null;
+  try {
+    const result = await ListIndexes(profileName, table.name);
+    if (result.status !== "ok") {
+      table.indexesError = result.message;
+      table.indexes = null;
+      return;
+    }
+    table.indexes = result.indexes ?? [];
+  } catch (err) {
+    table.indexesError = String(err);
+    table.indexes = null;
+  } finally {
+    table.indexesLoading = false;
   }
 }

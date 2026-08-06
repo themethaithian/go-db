@@ -109,6 +109,12 @@ func (a *App) ListColumns(profileName, table string) service.ColumnList {
 	return a.svc.ListColumns(a.ctx, profileName, table)
 }
 
+// ListIndexes returns the indexes on table in the named Profile's schema,
+// for the Explorer's Structure view of a table.
+func (a *App) ListIndexes(profileName, table string) service.IndexList {
+	return a.svc.ListIndexes(a.ctx, profileName, table)
+}
+
 // Classify reports whether sql is provably read-only, without connecting to
 // anything or running it. The editor calls it as the human types, to drive
 // the read/mutation badge.

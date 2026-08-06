@@ -11,15 +11,24 @@
   import type { guard, service } from "../../wailsjs/go/models";
   import ImpactPreview from "./ImpactPreview.svelte";
 
+  //
+  // The statement itself is shown when the caller passes it, and the callers
+  // that do are the ones where nobody typed it: an UPDATE generated from an
+  // edited row is a statement the human has never seen, and confirming a
+  // statement you cannot read is not a decision. The Editor leaves it off —
+  // its text is on screen directly above, in the buffer it came from.
   let {
     reason,
     preview,
     pendingId,
+    sql = null,
     onResolved,
   }: {
     reason: string;
     preview: guard.Preview;
     pendingId: string;
+    /** The withheld statement's text, for statements the human did not type. */
+    sql?: string | null;
     onResolved: (result: service.QueryResult) => void;
   } = $props();
 
@@ -93,6 +102,10 @@
   </header>
 
   <div class="min-h-0 flex-1 overflow-auto p-3">
+    {#if sql !== null}
+      <pre
+        class="mb-3 overflow-x-auto rounded-control border border-border bg-surface px-3 py-2 font-mono text-base whitespace-pre-wrap text-text">{sql}</pre>
+    {/if}
     <ImpactPreview {preview} />
   </div>
 

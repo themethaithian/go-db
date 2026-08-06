@@ -11,11 +11,19 @@
   // that same caller's business too — this table only says which modifier the
   // mouse was holding. Leaving both props off — as the Editor does — leaves
   // rows unclickable and the markup unchanged.
+  //
+  // Unsaved edits show here too, though they are never made here: `pending`
+  // maps a cell to the value typed over it in the record pane, and the grid
+  // draws that value in the accent until it is saved or reverted. The grid
+  // stays a reading surface — its click already means "pick this row", and an
+  // editor opened on a double-click would have to dismantle a comparison to
+  // get at the cell under it.
   let {
     columns,
     rows,
     truncated,
     selectedIndices = [],
+    pending,
     onRowClick,
   }: {
     columns: string[];
@@ -23,6 +31,8 @@
     truncated: boolean;
     /** Indices into `rows` of the picked rows, newest last. Ignored without onRowClick. */
     selectedIndices?: number[];
+    /** Unsaved values by `row:column` index, from the pane that edited them. */
+    pending?: Map<string, string | null>;
     /** Given, rows become clickable and report their index into `rows`. */
     onRowClick?: (index: number, options: { additive: boolean }) => void;
   } = $props();
@@ -124,11 +134,18 @@
               use:reveal={index === focused}
             >
               {#each row as cell, j (j)}
-                <td class="border-b border-border/60 px-3 py-2 text-text tabular-nums whitespace-nowrap">
-                  {#if cell === null}
+                {@const edited = pending?.has(`${index}:${j}`) ?? false}
+                {@const value = edited ? (pending?.get(`${index}:${j}`) ?? null) : cell}
+                <td
+                  class="border-b border-border/60 px-3 py-2 tabular-nums whitespace-nowrap {edited
+                    ? 'bg-accent/10 text-accent'
+                    : 'text-text'}"
+                  title={edited ? "Edited — not saved yet" : undefined}
+                >
+                  {#if value === null}
                     <span class="text-text-subtle italic">NULL</span>
                   {:else}
-                    {cell}
+                    {value}
                   {/if}
                 </td>
               {/each}

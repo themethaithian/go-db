@@ -20,12 +20,16 @@
   import RecordPane from "./RecordPane.svelte";
   import Splitter from "./Splitter.svelte";
   import { clamp } from "./layout.svelte";
+  import type { RowEdits } from "./edits.svelte";
 
   let {
     columns,
     rows,
     indices,
     totalRows,
+    edits = null,
+    editable = false,
+    readOnlyHint = null,
     bodyWidth,
     gridMinPx,
     splitterPx,
@@ -42,6 +46,12 @@
     indices: number[];
     /** How many rows the grid is showing, for the single-row header. */
     totalRows: number;
+    /** The result set's pending edits — passed through to both panes untouched. */
+    edits?: RowEdits | null;
+    /** Whether these rows can be edited at all — the caller's verdict. */
+    editable?: boolean;
+    /** Why they cannot be, when they cannot and it is worth saying. */
+    readOnlyHint?: string | null;
     /** Width of the grid + pane strip, so the splitter knows its travel. */
     bodyWidth: number;
     /** Floor under the grid, so dragging the splitter cannot squeeze it out. */
@@ -104,7 +114,17 @@
     class="flex shrink-0 flex-col overflow-hidden border-l border-border bg-surface"
     style="width: {detailWidth}px"
   >
-    <RecordPane {columns} {rows} {indices} {totalRows} onExpand={() => (expanded = true)} {onClose} />
+    <RecordPane
+      {columns}
+      {rows}
+      {indices}
+      {totalRows}
+      {edits}
+      {editable}
+      {readOnlyHint}
+      onExpand={() => (expanded = true)}
+      {onClose}
+    />
   </aside>
 {/if}
 
@@ -128,7 +148,16 @@
       aria-label={indices.length > 1 ? "Compare rows" : "Row detail"}
       onclick={(event) => event.stopPropagation()}
     >
-      <RecordPane {columns} {rows} {indices} {totalRows} onClose={() => (expanded = false)} />
+      <RecordPane
+        {columns}
+        {rows}
+        {indices}
+        {totalRows}
+        {edits}
+        {editable}
+        {readOnlyHint}
+        onClose={() => (expanded = false)}
+      />
     </div>
   </div>
 {/if}

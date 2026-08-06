@@ -21,10 +21,19 @@
   // classifies it (and the READ ONLY transaction behind it) is the same
   // safety story as the Editor's. Sanitising it here would only teach people
   // that the panel writes queries they did not.
+  //
+  // Values in these rows can also be typed over, in the record pane, and that
+  // is the one thing this panel does that is not a read — but it is not a
+  // second write path either. Saving builds an UPDATE per dirty row and sends
+  // it through RunQuery like any other statement: the gate withholds it, the
+  // Inline Confirm below shows exactly what would run with its Impact Preview,
+  // and nothing moves until the human says so.
   import { untrack } from "svelte";
   import DatabaseTree from "./DatabaseTree.svelte";
+  import InlineConfirm from "./InlineConfirm.svelte";
   import RecordPaneDock from "./RecordPaneDock.svelte";
   import ResultsTable from "./ResultsTable.svelte";
+  import SaveBar from "./SaveBar.svelte";
   import Splitter from "./Splitter.svelte";
   import {
     clamp,
@@ -47,6 +56,8 @@
     selected,
     type TableNode,
   } from "./schema.svelte";
+  import { RowEdits } from "./edits.svelte";
+  import { editability, quoteIdentifier } from "./mutate";
   import { CancelPending, RunQuery } from "../../wailsjs/go/app/App";
   import type { service } from "../../wailsjs/go/models";
 
@@ -96,6 +107,11 @@
   // how far it may travel before one of the two is squeezed out.
   let bodyWidth = $state(0);
 
+  // The values typed over these rows and not yet saved. It belongs to this
+  // view, not to the module: the Editor's grid has its own, and a row index
+  // means nothing between two different result sets.
+  const edits = new RowEdits();
+
   // Fetches are numbered so a slow one cannot overwrite a fast one started
   // later: clicking three tables quickly must leave the third one's rows on
   // screen, not whichever query the database happened to finish last. Filter
@@ -115,6 +131,11 @@
   // rows it was taken from, however it was cleared.
   let pickedIndices = $derived(selectedRows.filter((index) => shownRows[index] !== undefined));
   let pickedRows = $derived(pickedIndices.map((index) => shownRows[index]));
+
+  // The statement a save is currently holding out for, if any. Read into a
+  // local so the panel that renders it and the props it is given are the same
+  // withheld statement, not two reads of a moving one.
+  let savePending = $derived(edits.pending);
 
   let filterDirty = $derived(filterInput.trim() !== browse.filter);
   // Comparing asks for more room than reading one row does, so the pane's
@@ -137,6 +158,13 @@
     tableNode !== null && (tableNode.loading || tableNode.indexesLoading),
   );
 
+  // Whether these rows can be typed over, which here comes down to one
+  // question: does the table have a primary key? Browsing selects *, so a key
+  // that exists is always in the result — there is no third case where the
+  // table has one and the grid cannot see it.
+  let editable = $derived(editability(selected.table, shownColumns, tableNode?.indexes ?? null));
+  let readOnlyHint = $derived(editable.editable ? null : editable.reason);
+
   // Every table starts on Data — a table switch is a strong enough signal
   // that a mode picked for the last one should not carry over.
   $effect(() => {
@@ -144,18 +172,24 @@
     mode = "data";
   });
 
-  // The Structure view's own fetch: on entering Structure for a table whose
-  // columns or indexes are not cached yet, ask for them. ensureColumns and
-  // ensureIndexes are the same no-op-if-cached calls the tree's toggleTable
-  // makes, so flipping between Data and Structure never re-asks the database.
+  // The schema this view needs. Indexes are wanted in either mode — the
+  // primary key is what decides whether the grid's rows can be edited, so Data
+  // asks for them too — while the columns are the Structure view's alone.
+  // ensureColumns and ensureIndexes are the same no-op-if-cached calls the
+  // tree's toggleTable makes, so flipping between Data and Structure, or
+  // between tables and back, never re-asks the database.
   $effect(() => {
-    if (mode !== "structure") return;
     const profileName = selected.profile;
     const node = tableNode;
     if (profileName === null || node === null) return;
-    ensureColumns(profileName, node);
     ensureIndexes(profileName, node);
+    if (mode !== "structure") return;
+    ensureColumns(profileName, node);
   });
+
+  // A confirm nobody will answer must not be left in the gate's queue: leaving
+  // the Explorer unmounts this view, and an Inline Confirm has no expiry.
+  $effect(() => () => edits.abandon());
 
   // The statement is the whole input to this view: whenever it changes — a
   // table picked in the tree, a condition applied, a limit chosen, or a
@@ -200,6 +234,10 @@
     // Rows picked out of the old result set cannot survive a new one — the
     // indices would land on some other rows, or on none.
     selectedRows = [];
+    // Nor can edits made against it, for the same reason, and a save waiting
+    // on a confirm is a save for rows that are about to be replaced.
+    edits.abandon();
+    edits.revert();
     // Rows from the table we were looking at a moment ago are worse than no
     // rows: they would sit under another table's name, or another condition.
     // They go the instant the statement changes — but re-running the same one
@@ -313,11 +351,23 @@
     onOpenInEditor(selected.profile, browseSql);
   }
 
-  // MySQL's identifier quoting: wrap in backticks, and double any backtick
-  // inside. A table named with one is pathological but legal, and a generated
-  // query that breaks on it would be a generated query nobody could trust.
-  function quoteIdentifier(name: string): string {
-    return "`" + name.replaceAll("`", "``") + "`";
+  // Sends the dirty rows to the gate, one UPDATE and one Inline Confirm at a
+  // time. Only a run that got all the way through re-fetches: a cancel part
+  // way leaves the rows it never reached dirty, and fetching over them would
+  // throw away exactly the edits the human kept.
+  async function saveEdits() {
+    const profileName = selected.profile;
+    if (profileName === null || !editable.editable) return;
+    const saved = await edits.save({
+      profileName,
+      table: editable.table,
+      keyColumns: editable.keyColumns,
+      columns: shownColumns,
+      rows: shownRows,
+    });
+    if (saved > 0 && edits.changes === 0 && selected.profile === profileName) {
+      void fetchRows(profileName, shownSql);
+    }
   }
 
   function resizeTree(next: number) {
@@ -443,6 +493,18 @@
     </div>
 
     <div class="flex min-h-0 flex-1 flex-col p-3">
+      <!-- A save in progress takes the whole panel, exactly as it does in the
+           Editor: one withheld UPDATE, its Impact Preview, and the two keys
+           that decide it. The grid comes back the moment it is answered. -->
+      {#if savePending !== null && savePending.pending_id && savePending.preview}
+        <InlineConfirm
+          reason={savePending.classification.reason}
+          preview={savePending.preview}
+          pendingId={savePending.pending_id}
+          sql={edits.pendingSql}
+          onResolved={(next) => edits.resolved(next)}
+        />
+      {:else}
       <section
         class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel"
       >
@@ -602,6 +664,7 @@
                 rows={shownRows}
                 truncated={result.truncated}
                 selectedIndices={pickedIndices}
+                pending={edits.cells(shownColumns)}
                 onRowClick={(index, options) => pickRow(index, options.additive)}
               />
             </div>
@@ -611,6 +674,9 @@
               rows={pickedRows}
               indices={pickedIndices}
               totalRows={shownRows.length}
+              {edits}
+              editable={editable.editable}
+              {readOnlyHint}
               {bodyWidth}
               gridMinPx={GRID_MIN_PX}
               splitterPx={SPLITTER_PX}
@@ -648,7 +714,19 @@
             {/if}
           </div>
         {/if}
+
+        {#if edits.changes > 0}
+          <SaveBar
+            changes={edits.changes}
+            rows={edits.dirtyRows.length}
+            saving={edits.saving}
+            failure={edits.failure}
+            onSave={saveEdits}
+            onRevert={() => edits.revert()}
+          />
+        {/if}
       </section>
+      {/if}
     </div>
   </div>
 </div>

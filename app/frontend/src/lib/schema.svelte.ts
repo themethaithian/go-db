@@ -160,6 +160,17 @@ export function refreshAll() {
   }
 }
 
+/**
+ * Loads a Profile's tables if nothing has yet, without expanding anything —
+ * the Editor's way into the same cache the tree fills. A statement can name a
+ * table the human has never clicked on, and asking what its primary key is has
+ * to start with knowing the table exists.
+ */
+export function ensureTables(profileName: string) {
+  const node = ensure(profileName);
+  if (node.tables === null && !node.loading) void loadTables(profileName);
+}
+
 /** Expands or collapses a table, loading its columns the first time. */
 export function toggleTable(profileName: string, table: TableNode) {
   table.expanded = !table.expanded;

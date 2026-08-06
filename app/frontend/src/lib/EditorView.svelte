@@ -24,6 +24,7 @@
   import ResultsTable from "./ResultsTable.svelte";
   import RecordPaneDock from "./RecordPaneDock.svelte";
   import InlineConfirm from "./InlineConfirm.svelte";
+  import SaveBar from "./SaveBar.svelte";
   import Splitter from "./Splitter.svelte";
   import {
     clamp,
@@ -45,6 +46,9 @@
   } from "./documents.svelte";
   import { deleteSaved, openSaved, saved, saveQuery } from "./saved.svelte";
   import { editorRanges, statementAt, subjectTable, type StatementRange } from "./statements";
+  import { ensureIndexes, ensureTables, findTable } from "./schema.svelte";
+  import { RowEdits } from "./edits.svelte";
+  import { editability, selectTarget } from "./mutate";
   import { Classify, RunQuery, CancelPending, SplitStatements } from "../../wailsjs/go/app/App";
   import type { guard, service } from "../../wailsjs/go/models";
 
@@ -96,6 +100,36 @@
   // point at a row, and those rows' cells in the same order.
   let pickedIndices = $derived(selectedRows.filter((index) => shownRows[index] !== undefined));
   let pickedRows = $derived(pickedIndices.map((index) => shownRows[index]));
+
+  // The values typed over these rows and not yet saved, and the statement a
+  // save is currently holding out for. Per view, like the selection: the
+  // Explorer's grid has its own, and a row index means nothing between two
+  // different result sets.
+  const edits = new RowEdits();
+  let savePending = $derived(edits.pending);
+
+  // Which table the rows on screen can be written back to — the statement that
+  // produced them has to be a plain single-table SELECT for there to be one at
+  // all (see selectTarget), and that table's primary key has to be in the
+  // result. The schema cache answers the second half; it is the same cache the
+  // Database tree fills, asked for without expanding anything in it.
+  let editTable = $derived(result?.status === "ok" ? selectTarget(ranSql) : null);
+  let editNode = $derived(
+    profileName === null || editTable === null ? null : findTable(profileName, editTable),
+  );
+  let editable = $derived(editability(editTable, shownColumns, editNode?.indexes ?? null));
+  let readOnlyHint = $derived(editable.editable ? null : editable.reason);
+
+  $effect(() => {
+    if (profileName === null || editTable === null) return;
+    ensureTables(profileName);
+    const node = editNode;
+    if (node !== null) ensureIndexes(profileName, node);
+  });
+
+  // A confirm nobody will answer must not be left in the gate's queue: leaving
+  // the Editor unmounts this view, and an Inline Confirm has no expiry.
+  $effect(() => () => edits.abandon());
 
   onMount(() => {
     if (seed !== null) onSeedConsumed();
@@ -252,21 +286,55 @@
   // is the only way forward, so a second Run cannot spawn a second pending
   // behind the human's back.
   let confirmOpen = $derived(result?.status === "requires_confirmation");
-  let canRun = $derived(profileName !== null && target !== "" && !running && !confirmOpen);
+  let canRun = $derived(
+    profileName !== null && target !== "" && !running && !confirmOpen && !edits.saving,
+  );
 
   async function run() {
     const statement = target;
-    if (profileName === null || statement === "" || running || confirmOpen) return;
+    if (!canRun || profileName === null) return;
+    await execute(profileName, statement);
+  }
+
+  // Runs the statement the Results pane is already showing again — what a
+  // finished save does, so the grid shows what was persisted rather than what
+  // was typed. It is the same read that produced the rows in the first place.
+  async function rerun() {
+    if (profileName === null || ranSql === "" || running) return;
+    await execute(profileName, ranSql);
+  }
+
+  async function execute(profile: string, statement: string) {
     running = true;
     // Rows picked out of the old result set cannot survive a new one — the
-    // indices would land on some other rows, or on none.
+    // indices would land on some other rows, or on none — and neither can
+    // values typed over them.
     selectedRows = [];
+    edits.abandon();
+    edits.revert();
     try {
-      result = await RunQuery(profileName, statement);
+      result = await RunQuery(profile, statement);
       ranSql = statement;
     } finally {
       running = false;
     }
+  }
+
+  // Sends the dirty rows to the gate, one UPDATE and one Inline Confirm at a
+  // time. Only a run that got all the way through re-runs the query: a cancel
+  // part way leaves the rows it never reached dirty, and running over them
+  // would throw away exactly the edits the human kept.
+  async function saveEdits() {
+    const profile = profileName;
+    if (profile === null || !editable.editable) return;
+    const saved = await edits.save({
+      profileName: profile,
+      table: editable.table,
+      keyColumns: editable.keyColumns,
+      columns: shownColumns,
+      rows: shownRows,
+    });
+    if (saved > 0 && edits.changes === 0 && profileName === profile) void rerun();
   }
 
   // Clicking a row picks it and nothing else — including when it was already
@@ -332,6 +400,8 @@
       result = null;
       ranSql = "";
       selectedRows = [];
+      edits.abandon();
+      edits.revert();
     });
   });
 
@@ -727,7 +797,18 @@
         onChange={resizeQuery}
       />
 
-      {#if result !== null && result.status === "requires_confirmation" && result.pending_id && result.preview}
+      <!-- A save's own withheld UPDATE comes first: it is a statement the human
+           asked for a moment ago, and it is answered the same way a typed one
+           is — same panel, same preview, same two keys. -->
+      {#if savePending !== null && savePending.pending_id && savePending.preview}
+        <InlineConfirm
+          reason={savePending.classification.reason}
+          preview={savePending.preview}
+          pendingId={savePending.pending_id}
+          sql={edits.pendingSql}
+          onResolved={(next) => edits.resolved(next)}
+        />
+      {:else if result !== null && result.status === "requires_confirmation" && result.pending_id && result.preview}
         <InlineConfirm
           reason={result.classification.reason}
           preview={result.preview}
@@ -782,6 +863,7 @@
                   rows={shownRows}
                   truncated={result.truncated}
                   selectedIndices={pickedIndices}
+                  pending={edits.cells(shownColumns)}
                   onRowClick={(index, options) => pickRow(index, options.additive)}
                 />
               </div>
@@ -791,6 +873,9 @@
                 rows={pickedRows}
                 indices={pickedIndices}
                 totalRows={shownRows.length}
+                {edits}
+                editable={editable.editable}
+                {readOnlyHint}
                 bodyWidth={resultsWidth}
                 gridMinPx={GRID_MIN_PX}
                 splitterPx={ROW_SPLITTER_PX}
@@ -835,6 +920,17 @@
                 {result.message}
               </p>
             </div>
+          {/if}
+
+          {#if edits.changes > 0}
+            <SaveBar
+              changes={edits.changes}
+              rows={edits.dirtyRows.length}
+              saving={edits.saving}
+              failure={edits.failure}
+              onSave={saveEdits}
+              onRevert={() => edits.revert()}
+            />
           {/if}
         </section>
       {/if}

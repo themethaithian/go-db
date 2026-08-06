@@ -39,6 +39,7 @@
     renameDocument,
     writeSql,
   } from "./documents.svelte";
+  import { deleteSaved, openSaved, saved, saveQuery } from "./saved.svelte";
   import { editorRanges, statementAt, subjectTable, type StatementRange } from "./statements";
   import { Classify, RunQuery, CancelPending, SplitStatements } from "../../wailsjs/go/app/App";
   import type { guard, service } from "../../wailsjs/go/models";
@@ -299,6 +300,71 @@
     node.focus();
     node.select();
   }
+
+  // The Saved popover and the "Saved" transient beside the save button. Both
+  // live here rather than in saved.svelte.ts: they are about this screen
+  // reacting to a save, not about the library itself.
+  let savedPopoverOpen = $state(false);
+  let savedFeedback = $state(false);
+  let savedFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
+  let savedPanel: HTMLDivElement | undefined;
+
+  let canSave = $derived(sql.trim() !== "");
+
+  // Saves the active tab under its own name — silently overwriting a saved
+  // entry of the same name, per saveQuery's contract — and shows a brief
+  // confirmation rather than nothing, since a save with no feedback reads as
+  // a save that failed.
+  function saveActive() {
+    if (!canSave) return;
+    saveQuery(doc.name, sql);
+    savedFeedback = true;
+    clearTimeout(savedFeedbackTimer);
+    savedFeedbackTimer = setTimeout(() => {
+      savedFeedback = false;
+    }, 1400);
+  }
+
+  function toggleSavedPopover() {
+    savedPopoverOpen = !savedPopoverOpen;
+  }
+
+  // Opening a saved query closes the popover — the human asked to see their
+  // query, not to keep browsing the list beside it.
+  function selectSaved(id: string) {
+    openSaved(id);
+    savedPopoverOpen = false;
+  }
+
+  // No live ticking: a saved query's date is a fact about the past, not a
+  // countdown, so the exact wording only needs to be right when it renders.
+  function formatSavedAt(iso: string): string {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  // Scoped listeners, alive only while the popover is open: a click outside
+  // it or an Escape closes it, and both are torn down the moment it does so
+  // nothing keeps listening to the whole document once there is nothing to
+  // close.
+  $effect(() => {
+    if (!savedPopoverOpen) return;
+    function onPointerDown(event: MouseEvent) {
+      if (savedPanel && !savedPanel.contains(event.target as Node)) {
+        savedPopoverOpen = false;
+      }
+    }
+    function onKeydown(event: KeyboardEvent) {
+      if (event.key === "Escape") savedPopoverOpen = false;
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeydown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeydown);
+    };
+  });
 </script>
 
 <div class="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
@@ -387,10 +453,11 @@
              so naming it twice (a "QUERY" caption above a row of names) would
              be one label too many in 32 pixels. -->
         <div
-          class="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border pr-1"
+          class="flex h-8 shrink-0 items-stretch border-b border-border"
           role="tablist"
           aria-label="Query tabs"
         >
+          <div class="flex min-w-0 flex-1 items-stretch overflow-x-auto pr-1">
           {#each documents.open as tab (tab.id)}
             <div
               class="group flex shrink-0 items-center border-b-2 pr-1 pl-2.5 transition-colors {tab.id ===
@@ -467,6 +534,112 @@
               <path d="M6 2v8M2 6h8" />
             </svg>
           </button>
+        </div>
+
+        <div
+          class="relative flex shrink-0 items-center gap-1 border-l border-border px-1.5"
+          bind:this={savedPanel}
+        >
+          {#if savedFeedback}
+            <span class="text-xs font-medium text-success">Saved</span>
+          {/if}
+
+          <button
+            type="button"
+            class="flex h-6 w-6 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-raised hover:text-text disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-subtle"
+            title="Save &quot;{doc.name}&quot; to Saved queries"
+            aria-label="Save query"
+            disabled={!canSave}
+            onclick={saveActive}
+          >
+            <svg
+              class="h-3 w-3"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 1.75h6a1 1 0 0 1 1 1v7.5l-4-2.4-4 2.4v-7.5a1 1 0 0 1 1-1z" />
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            class="flex h-6 shrink-0 items-center gap-1 rounded-control px-1.5 text-sm font-medium text-text-muted transition-colors hover:bg-surface-raised hover:text-text"
+            aria-haspopup="true"
+            aria-expanded={savedPopoverOpen}
+            onclick={toggleSavedPopover}
+          >
+            Saved
+            {#if saved.count > 0}
+              <span class="rounded-full bg-accent/20 px-1.5 text-xs font-semibold text-accent">
+                {saved.count}
+              </span>
+            {/if}
+            <svg
+              class="h-2.5 w-2.5"
+              viewBox="0 0 10 10"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M2.5 4l2.5 2.5L7.5 4" />
+            </svg>
+          </button>
+
+          {#if savedPopoverOpen}
+            <div
+              class="absolute top-full right-0 z-10 mt-1 w-64 rounded-panel border border-border bg-surface-panel p-1 shadow-panel"
+              role="menu"
+              aria-label="Saved queries"
+            >
+              {#if saved.all.length === 0}
+                <p class="px-2 py-3 text-center text-sm text-text-subtle">No saved queries yet.</p>
+              {:else}
+                {#each saved.all as entry (entry.id)}
+                  <div
+                    class="group flex items-start gap-1 rounded-control px-1.5 py-1.5 hover:bg-surface-raised"
+                  >
+                    <button
+                      type="button"
+                      class="min-w-0 flex-1 text-left"
+                      onclick={() => selectSaved(entry.id)}
+                    >
+                      <div class="truncate text-sm font-semibold text-text">{entry.name}</div>
+                      <div class="truncate font-mono text-xs text-text-subtle">{entry.sql}</div>
+                      <div class="text-xs text-text-subtle">{formatSavedAt(entry.savedAt)}</div>
+                    </button>
+                    <button
+                      type="button"
+                      class="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-control text-text-subtle opacity-0 transition-opacity hover:bg-surface-overlay hover:text-text group-hover:opacity-100 focus-visible:opacity-100"
+                      title="Delete {entry.name}"
+                      aria-label="Delete {entry.name}"
+                      onclick={() => deleteSaved(entry.id)}
+                    >
+                      <svg
+                        class="h-2.5 w-2.5"
+                        viewBox="0 0 10 10"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M2 2l6 6M8 2l-6 6" />
+                      </svg>
+                    </button>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          {/if}
+        </div>
         </div>
         <div class="min-h-0 flex-1">
           <SqlEditor

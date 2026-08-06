@@ -22,7 +22,12 @@ export const TREE_MAX_PX = 420;
 export const QUERY_MIN_PX = 120;
 export const RESULTS_MIN_PX = 160;
 
-/** Minimum width of the Explorer's record pane, and of the grid it sits beside. */
+/**
+ * Minimum width of a record pane (Explorer or Editor), and of the grid it
+ * sits beside. One pair of constants for both: the pane is the same
+ * component in both views, and there is nothing about either view that
+ * wants a different floor.
+ */
 export const DETAIL_MIN_PX = 220;
 export const GRID_MIN_PX = 240;
 
@@ -39,12 +44,15 @@ type Layout = {
   explorerDetailWidth: number;
   /** Editor: height of the Query pane; Results takes whatever is left. */
   editorQueryHeight: number;
+  /** Editor: width of the Row pane beside the results grid, when one is open. */
+  editorDetailWidth: number;
 };
 
 const DEFAULTS: Layout = {
   explorerTreeWidth: 244,
   explorerDetailWidth: 300,
   editorQueryHeight: 236,
+  editorDetailWidth: 300,
 };
 
 const STORAGE_KEY = "go-db:workspace-layout";
@@ -65,6 +73,7 @@ function restore(): Layout {
       explorerTreeWidth: size(parsed.explorerTreeWidth, DEFAULTS.explorerTreeWidth),
       explorerDetailWidth: size(parsed.explorerDetailWidth, DEFAULTS.explorerDetailWidth),
       editorQueryHeight: size(parsed.editorQueryHeight, DEFAULTS.editorQueryHeight),
+      editorDetailWidth: size(parsed.editorDetailWidth, DEFAULTS.editorDetailWidth),
     };
   } catch {
     return { ...DEFAULTS };
@@ -86,6 +95,7 @@ export function persistLayout() {
         explorerTreeWidth: layout.explorerTreeWidth,
         explorerDetailWidth: layout.explorerDetailWidth,
         editorQueryHeight: layout.editorQueryHeight,
+        editorDetailWidth: layout.editorDetailWidth,
       }),
     );
   } catch {

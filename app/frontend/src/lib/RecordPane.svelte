@@ -15,14 +15,21 @@
   // diffing them by eye is the job this pane exists to take away.
   //
   // The pane renders what it is given and reports the close: which rows are
-  // picked is the Explorer's state, because the grid highlights the same
-  // selection and the two must not be able to disagree.
+  // picked is the caller's state (Explorer or Editor), because the grid
+  // highlights the same selection and the two must not be able to disagree.
+  //
+  // This same component is what the pop-out shows: onExpand is the docked
+  // pane's own affordance for opening it, so it is only given to the docked
+  // instance — the popup's copy of this pane has nothing further to expand
+  // into. onClose means "close the row pane" docked (clearing the selection)
+  // but "close the popup" in the pop-out (leaving the selection alone); which
+  // one it does is entirely up to the caller that wires it.
   let {
     columns,
     rows,
     indices,
     totalRows,
-    note = null,
+    onExpand,
     onClose,
   }: {
     columns: string[];
@@ -32,8 +39,8 @@
     indices: number[];
     /** How many rows the grid is showing, for the single-row header. */
     totalRows: number;
-    /** A transient line for the header (the selection cap), or null. */
-    note?: string | null;
+    /** Given, a header button opens the pop-out. Omitted in the pop-out itself. */
+    onExpand?: () => void;
     onClose: () => void;
   } = $props();
 
@@ -92,11 +99,31 @@
     {comparing ? `· ${rows.length} rows` : `of ${totalRows}`}
   </span>
 
-  {#if note !== null}
-    <span class="truncate text-xs text-warning/80">{note}</span>
-  {/if}
-
   <div class="ml-auto"></div>
+  {#if onExpand !== undefined}
+    <button
+      type="button"
+      class="flex h-5 w-5 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-overlay hover:text-text"
+      onclick={onExpand}
+      title="Expand into a large view"
+      aria-label="Expand into a large view"
+    >
+      <svg
+        class="h-3 w-3"
+        viewBox="0 0 12 12"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M2.5 5.5v-3h3" />
+        <path d="M9.5 6.5v3h-3" />
+        <path d="M2.5 2.5l3 3M9.5 9.5l-3-3" />
+      </svg>
+    </button>
+  {/if}
   <button
     type="button"
     class="flex h-5 w-5 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-overlay hover:text-text"

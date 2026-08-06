@@ -23,7 +23,7 @@
   // that the panel writes queries they did not.
   import { untrack } from "svelte";
   import DatabaseTree from "./DatabaseTree.svelte";
-  import RecordPane from "./RecordPane.svelte";
+  import RecordPaneDock from "./RecordPaneDock.svelte";
   import ResultsTable from "./ResultsTable.svelte";
   import Splitter from "./Splitter.svelte";
   import {
@@ -67,14 +67,6 @@
   // neither the grid nor the record pane gets.
   const SPLITTER_PX = 6;
 
-  // How many rows may be compared at once. Comparison is reading, and four
-  // columns of values is about as much as a pane beside a grid can show
-  // before the reading stops being easier than the grid it came from.
-  const MAX_COMPARE_ROWS = 4;
-
-  /** How long the "up to 4 rows" note stays in the pane header. */
-  const NOTE_MS = 2000;
-
   let result = $state<service.QueryResult | null>(null);
   let failure = $state<string | null>(null);
   let loading = $state(false);
@@ -93,11 +85,6 @@
   // Empty means the pane is closed. Every fetch clears it: an index means
   // nothing against a result set it was not taken from.
   let selectedRows = $state<number[]>([]);
-
-  // Set for a moment when a cmd-click is turned away at the cap, so the pane
-  // can say why nothing happened. Silence would read as a dead click.
-  let capNote = $state(false);
-  let noteTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Data shows the grid and its WHERE/LIMIT controls; Structure shows the
   // table's columns and indexes instead. It is not scoped by table the way
@@ -208,12 +195,6 @@
     if (next !== layout.explorerDetailWidth) layout.explorerDetailWidth = next;
   });
 
-  // The cap note is a timer, and a timer that outlives the view would write
-  // to state nobody is watching.
-  $effect(() => () => {
-    if (noteTimer !== null) clearTimeout(noteTimer);
-  });
-
   async function fetchRows(profileName: string, sql: string) {
     const request = (latestRequest += 1);
     // Rows picked out of the old result set cannot survive a new one — the
@@ -295,9 +276,10 @@
   // Clicking a row picks it and nothing else — including when it was already
   // one of several, which is the way back from a comparison to a single row.
   // Cmd (or Ctrl) adds a row to the comparison, or takes it back out, and the
-  // order rows go in is the order their columns appear in the pane. Past the
-  // cap the click is refused rather than silently dropping someone else's
-  // row: which of the four to give up is not this view's decision to make.
+  // order rows go in is the order their columns appear in the pane. There is
+  // no cap: the pane scrolls sideways under the field-name column once the
+  // value columns outrun the width, so comparing more rows than fit is a
+  // scroll away, not a wall.
   function pickRow(index: number, additive: boolean) {
     if (!additive) {
       selectedRows = [index];
@@ -307,29 +289,16 @@
       selectedRows = selectedRows.filter((picked) => picked !== index);
       return;
     }
-    if (selectedRows.length >= MAX_COMPARE_ROWS) {
-      showCapNote();
-      return;
-    }
     selectedRows = [...selectedRows, index];
   }
 
-  function showCapNote() {
-    capNote = true;
-    if (noteTimer !== null) clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => (capNote = false), NOTE_MS);
-  }
-
-  // Escape clears the whole selection from anywhere, and up/down walk one row
-  // through the rows — but never while a control has the focus, where those
-  // keys already mean something to it. Walking out of a comparison collapses
-  // it: the keys move a single row, and the pane follows what they moved.
+  // Up/down walk one row through the rows — but never while a control has the
+  // focus, where those keys already mean something to it. Walking out of a
+  // comparison collapses it: the keys move a single row, and the pane follows
+  // what they moved. Escape is RecordPaneDock's own business (it also has to
+  // arbitrate the pop-out), so this only ever sees the arrow keys.
   function handleWindowKey(event: KeyboardEvent) {
     if (selectedRows.length === 0) return;
-    if (event.key === "Escape") {
-      selectedRows = [];
-      return;
-    }
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     const tag = (event.target as HTMLElement | null)?.tagName;
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
@@ -353,13 +322,6 @@
 
   function resizeTree(next: number) {
     layout.explorerTreeWidth = clamp(next, TREE_MIN_PX, TREE_MAX_PX);
-    persistLayout();
-  }
-
-  // The splitter reports the width of the pane before it — the grid — so the
-  // record pane is whatever the strip has left over.
-  function resizeDetail(gridWidth: number) {
-    layout.explorerDetailWidth = clamp(bodyWidth - SPLITTER_PX - gridWidth, detailMin, detailMax);
     persistLayout();
   }
 </script>
@@ -644,33 +606,23 @@
               />
             </div>
 
-            {#if pickedIndices.length > 0}
-              <Splitter
-                orientation="vertical"
-                value={bodyWidth - SPLITTER_PX - layout.explorerDetailWidth}
-                min={GRID_MIN_PX}
-                max={Math.max(GRID_MIN_PX, bodyWidth - SPLITTER_PX - detailMin)}
-                label="Resize the row pane"
-                onChange={resizeDetail}
-              />
-
-              <!-- The picked rows, read down instead of across: the shape you
-                   want the moment a table has more columns than the window has
-                   width — and, with more than one row picked, side by side. -->
-              <aside
-                class="flex shrink-0 flex-col overflow-hidden border-l border-border bg-surface"
-                style="width: {layout.explorerDetailWidth}px"
-              >
-                <RecordPane
-                  columns={shownColumns}
-                  rows={pickedRows}
-                  indices={pickedIndices}
-                  totalRows={shownRows.length}
-                  note={capNote ? `Up to ${MAX_COMPARE_ROWS} rows` : null}
-                  onClose={() => (selectedRows = [])}
-                />
-              </aside>
-            {/if}
+            <RecordPaneDock
+              columns={shownColumns}
+              rows={pickedRows}
+              indices={pickedIndices}
+              totalRows={shownRows.length}
+              {bodyWidth}
+              gridMinPx={GRID_MIN_PX}
+              splitterPx={SPLITTER_PX}
+              detailWidth={layout.explorerDetailWidth}
+              {detailMin}
+              {detailMax}
+              onResizeDetail={(next) => {
+                layout.explorerDetailWidth = next;
+                persistLayout();
+              }}
+              onClose={() => (selectedRows = [])}
+            />
           </div>
         {:else}
           <!-- Anything but "ok" is the connection, the database, or the gate

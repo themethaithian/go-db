@@ -22,12 +22,16 @@
   import { onMount, untrack } from "svelte";
   import SqlEditor from "./SqlEditor.svelte";
   import ResultsTable from "./ResultsTable.svelte";
+  import RecordPaneDock from "./RecordPaneDock.svelte";
   import InlineConfirm from "./InlineConfirm.svelte";
   import Splitter from "./Splitter.svelte";
   import {
     clamp,
     layout,
     persistLayout,
+    COMPARE_MIN_PX,
+    DETAIL_MIN_PX,
+    GRID_MIN_PX,
     QUERY_MIN_PX,
     RESULTS_MIN_PX,
   } from "./layout.svelte";
@@ -77,6 +81,22 @@
   // caption is a record rather than a promise.
   let ranSql = $state("");
 
+  // The picked rows, as indices into the rows on screen and in the order they
+  // were picked — that order is the order of the record pane's value
+  // columns. Empty means the pane is closed. Every run clears it, the same
+  // way a fresh fetch does in the Explorer: an index means nothing against a
+  // result set it was not taken from.
+  let selectedRows = $state<number[]>([]);
+
+  let shownColumns = $derived(result?.status === "ok" ? (result.columns ?? []) : []);
+  let shownRows = $derived(
+    result?.status === "ok" ? ((result.rows ?? []) as (string | null)[][]) : [],
+  );
+  // The selection as the pane and the grid both see it: indices that still
+  // point at a row, and those rows' cells in the same order.
+  let pickedIndices = $derived(selectedRows.filter((index) => shownRows[index] !== undefined));
+  let pickedRows = $derived(pickedIndices.map((index) => shownRows[index]));
+
   onMount(() => {
     if (seed !== null) onSeedConsumed();
   });
@@ -105,12 +125,25 @@
   // either side), which is height the two panes do not get.
   const SPLITTER_PX = 14;
 
+  // The vertical splitter's own footprint, between the results grid and the
+  // record pane beside it — the same 6px hit area the Explorer's uses.
+  const ROW_SPLITTER_PX = 6;
+
   // Measured height of the Query+Results stack, so the splitter between them
   // knows how far down it may go before Results is squeezed out of existence.
   let stackHeight = $state(0);
   let queryMaxHeight = $derived(
     Math.max(QUERY_MIN_PX, stackHeight - RESULTS_MIN_PX - SPLITTER_PX),
   );
+
+  // Width of the results grid + record pane strip, so the vertical splitter
+  // between them knows how far it may travel before one of the two is
+  // squeezed out.
+  let resultsWidth = $state(0);
+  // Comparing asks for more room than reading one row does, so the pane's
+  // floor moves with what it is doing.
+  let detailMin = $derived(pickedIndices.length > 1 ? COMPARE_MIN_PX : DETAIL_MIN_PX);
+  let detailMax = $derived(Math.max(detailMin, resultsWidth - GRID_MIN_PX - ROW_SPLITTER_PX));
 
   // A window that shrinks must shrink the Query pane with it, or Results
   // disappears below the fold with no way to drag it back.
@@ -119,6 +152,17 @@
     if (stackHeight > 0 && layout.editorQueryHeight > max) {
       layout.editorQueryHeight = max;
     }
+  });
+
+  // The same shrink protection for the record pane beside the results grid —
+  // a pane wider than the window has room for would push the grid off the
+  // edge with no way to drag it back.
+  $effect(() => {
+    const min = detailMin;
+    const max = detailMax;
+    if (resultsWidth <= 0) return;
+    const next = clamp(untrack(() => layout.editorDetailWidth), min, max);
+    if (next !== layout.editorDetailWidth) layout.editorDetailWidth = next;
   });
 
   // If the selected Profile disconnects out from under the editor, fall back
@@ -214,12 +258,33 @@
     const statement = target;
     if (profileName === null || statement === "" || running || confirmOpen) return;
     running = true;
+    // Rows picked out of the old result set cannot survive a new one — the
+    // indices would land on some other rows, or on none.
+    selectedRows = [];
     try {
       result = await RunQuery(profileName, statement);
       ranSql = statement;
     } finally {
       running = false;
     }
+  }
+
+  // Clicking a row picks it and nothing else — including when it was already
+  // one of several, which is the way back from a comparison to a single row.
+  // Cmd (or Ctrl) adds a row to the comparison, or takes it back out. There is
+  // no cap: the pane scrolls sideways under the field-name column once the
+  // value columns outrun the width, so comparing more rows than fit is a
+  // scroll away, not a wall.
+  function pickRow(index: number, additive: boolean) {
+    if (!additive) {
+      selectedRows = [index];
+      return;
+    }
+    if (selectedRows.includes(index)) {
+      selectedRows = selectedRows.filter((picked) => picked !== index);
+      return;
+    }
+    selectedRows = [...selectedRows, index];
   }
 
   function handleSqlChange(next: string) {
@@ -266,6 +331,7 @@
     untrack(() => {
       result = null;
       ranSql = "";
+      selectedRows = [];
     });
   });
 
@@ -709,11 +775,35 @@
               </p>
             </div>
           {:else if result.status === "ok"}
-            <ResultsTable
-              columns={result.columns ?? []}
-              rows={(result.rows ?? []) as (string | null)[][]}
-              truncated={result.truncated}
-            />
+            <div class="flex min-h-0 min-w-0 flex-1" bind:clientWidth={resultsWidth}>
+              <div class="flex min-w-0 flex-1">
+                <ResultsTable
+                  columns={shownColumns}
+                  rows={shownRows}
+                  truncated={result.truncated}
+                  selectedIndices={pickedIndices}
+                  onRowClick={(index, options) => pickRow(index, options.additive)}
+                />
+              </div>
+
+              <RecordPaneDock
+                columns={shownColumns}
+                rows={pickedRows}
+                indices={pickedIndices}
+                totalRows={shownRows.length}
+                bodyWidth={resultsWidth}
+                gridMinPx={GRID_MIN_PX}
+                splitterPx={ROW_SPLITTER_PX}
+                detailWidth={layout.editorDetailWidth}
+                {detailMin}
+                {detailMax}
+                onResizeDetail={(next) => {
+                  layout.editorDetailWidth = next;
+                  persistLayout();
+                }}
+                onClose={() => (selectedRows = [])}
+              />
+            </div>
           {:else if result.status === "executed"}
             <div class="p-3">
               <p

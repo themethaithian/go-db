@@ -279,7 +279,20 @@
     </div>
   {:else}
     <div class="min-h-0 flex-1 overflow-auto">
-      <table class="w-full min-w-max border-collapse text-left">
+      <!-- The grid is not text. A click here means "pick this row" and a
+           shift-click means "pick these rows", so the browser's own reading of
+           the same gestures — put a caret here, drag a highlight to there —
+           has nothing to contribute and everything to take away: a black
+           smear across the rows you just selected. Every DB tool turns it off
+           for the same reason, and hands the copying back through affordances
+           that copy a *value* rather than whatever the pointer swept over —
+           here, the record pane's per-field copy button. The one place text is
+           still text is inside an open cell editor, which says so itself.
+
+           This is half the fix; the other half is on the row, where a
+           shift-click has to be stopped from extending a selection that was
+           anchored somewhere outside this table. -->
+      <table class="w-full min-w-max border-collapse text-left select-none">
         <thead class="sticky top-0 z-10">
           <tr>
             {#each columns as column (column)}
@@ -311,6 +324,19 @@
                 ? 'bg-accent/15'
                 : 'hover:bg-surface-overlay'} {selectable ? 'cursor-pointer' : ''}"
               aria-selected={selectable ? chosen : undefined}
+              onmousedown={onRowClick === undefined
+                ? undefined
+                : (event) => {
+                    // A shift-click is the browser's "extend the selection to
+                    // here" as much as it is this table's "extend the picked
+                    // range to here", and an anchor left in the record pane
+                    // beside the grid is enough for it to sweep a highlight
+                    // across everything in between. Refusing the default on
+                    // the mousedown that carries the modifier heads that off
+                    // without touching the plain click, which still focuses
+                    // and clicks the way a row should.
+                    if (event.shiftKey) event.preventDefault();
+                  }}
               onclick={onRowClick === undefined
                 ? undefined
                 : (event) =>
@@ -346,7 +372,7 @@
                 >
                   {#if open}
                     <input
-                      class="box-border block w-full border-0 bg-surface px-3 py-2 font-mono text-base leading-5 text-text ring-2 ring-inset ring-accent focus:outline-none"
+                      class="box-border block w-full border-0 bg-surface px-3 py-2 font-mono text-base leading-5 text-text ring-2 ring-accent select-text ring-inset focus:outline-none"
                       bind:value={cellDraft}
                       use:openCellEditor
                       onkeydown={(event) => handleCellKeydown(event, index, j, cell)}

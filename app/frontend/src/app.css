@@ -60,6 +60,15 @@
   --text-lg: 0.9375rem;
   --text-xl: 1.0625rem;
 
+  /*
+   * The widest a single value is allowed to run before it wraps instead
+   * (max-w-value). A record pane in a pop-out is far wider than any line of
+   * data is worth reading across, and a comparison's columns have to be
+   * capped somewhere or one long text field pushes every other row off the
+   * right edge.
+   */
+  --container-value: 22rem;
+
   /* Radius: control (inputs/buttons) vs panel (cards/surfaces) */
   --radius-control: 0.375rem;
   --radius-panel: 0.625rem;

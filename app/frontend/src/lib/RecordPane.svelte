@@ -96,12 +96,34 @@
   let editing = $state<{ row: number; column: string } | null>(null);
   let draft = $state("");
 
-  // A fixed name column, then one value column per picked row. Comparing
-  // gives the value columns a floor wide enough to read: four of them will
-  // not fit a pane this narrow, so the pane scrolls sideways under a name
-  // column that stays put.
+  // The field name column, then one value column per picked row.
+  //
+  // The name column is deliberately the narrowest thing that still reads: a
+  // field name is looked at once to find the row you want and then ignored,
+  // while the value beside it is what the pane exists to show. Anything wider
+  // is width taken from the values — the pane's whole failure mode, since a
+  // value that does not fit wraps mid-word and stops being readable at all.
+  // Names longer than the column truncate and carry their full text as a
+  // tooltip, which is the cheap half of the trade.
+  //
+  // One row gets the rest of the pane for its value, and wraps inside it —
+  // a single row is read down, so there is nothing to scroll sideways for.
+  //
+  // Comparing sizes each value column to its own content instead, between a
+  // floor wide enough to be worth a column at all and whatever the widest
+  // value in it needs (capped by max-w-value on the value itself, so one long
+  // text field cannot push every other column off the edge). Content-sized is
+  // the whole difference between a comparison you can read and one you
+  // cannot: equal columns cut the long values up to pay for the short ones,
+  // and an email broken across two lines in every column is exactly what
+  // there is no room for. So the grid is laid out at its content's width and
+  // the pane scrolls under a name column that stays put — with a last track
+  // taking up whatever slack a wide pop-out leaves, so the rows still rule a
+  // line all the way across.
   let template = $derived(
-    comparing ? `6.5rem repeat(${rows.length}, minmax(10.5rem, 1fr))` : "6.5rem minmax(0, 1fr)",
+    comparing
+      ? `7rem repeat(${rows.length}, minmax(9rem, max-content)) minmax(0, 1fr)`
+      : "7rem minmax(0, 1fr)",
   );
 
   // Which cell just went to the clipboard, as "field:column" — the feedback
@@ -243,7 +265,13 @@
 </div>
 
 <div class="min-h-0 flex-1 overflow-auto">
-  <div class="grid min-w-full" style="grid-template-columns: {template}">
+  <!-- Comparing lays the grid out at its content's width (and never less than
+       the pane's); one row wraps inside the pane instead, which is why only
+       the comparison asks to be as wide as it needs. -->
+  <div
+    class="grid {comparing ? 'w-max min-w-full' : 'min-w-full'}"
+    style="grid-template-columns: {template}"
+  >
     {#if comparing}
       <!-- The corner: it holds the name column's ground while the value
            headers scroll under it, so it outranks both. -->
@@ -257,21 +285,29 @@
           </span>
         </div>
       {/each}
+      <div class="sticky top-0 z-20 border-b border-border bg-surface"></div>
     {/if}
 
     {#each columns as column, field (column)}
+      <!-- The name reads left, where a column of names is scanned from, and
+           the difference dot sits at the far edge instead — hard against the
+           values it is talking about, so the dots line up as a rail down the
+           seam rather than ragged against names of every length. -->
       <div
-        class="sticky left-0 z-10 flex items-start justify-end gap-1.5 border-b border-border/60 bg-surface py-1.5 pr-2 pl-3"
+        class="sticky left-0 z-10 flex items-start gap-1.5 border-b border-border/60 bg-surface py-1.5 pr-2 pl-3"
       >
+        <span
+          class="min-w-0 flex-1 truncate font-mono text-xs leading-6 text-text-muted"
+          title={column}
+        >
+          {column}
+        </span>
         {#if differing[field]}
           <span
-            class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
+            class="mt-2.5 h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
             title="These rows differ on this field"
           ></span>
         {/if}
-        <span class="truncate text-right font-mono text-xs leading-5 text-text-muted" title={column}>
-          {column}
-        </span>
       </div>
 
       {#each rows as row, column_index (indices[column_index])}
@@ -282,12 +318,12 @@
         {@const dirty = edits?.dirty(at, column) ?? false}
         {@const open = editing !== null && editing.row === at && editing.column === column}
         <!-- Double-click opens the field, which is the gesture people arrive
-             with; the pencil in the corner is the discoverable one. The a11y
-             route is the pencil, which is a real button. -->
+             with; the pencil beside the value is the discoverable one. The
+             a11y route is the pencil, which is a real button. -->
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
-          class="group relative border-b border-border/60 px-3 py-1.5 {dirty
+          class="group flex items-start gap-2 border-b border-border/60 px-3 py-1.5 {dirty
             ? 'bg-accent/10 ring-1 ring-accent/40 ring-inset'
             : differing[field]
               ? 'bg-warning/10'
@@ -295,55 +331,81 @@
           ondblclick={() => startEdit(at, column, value)}
         >
           {#if open}
-            <div class="flex items-center gap-1">
-              <input
-                class="min-w-0 flex-1 rounded-control border border-accent bg-surface px-1.5 py-px font-mono text-base leading-5 text-text focus:outline-none"
-                bind:value={draft}
-                use:openEditor
-                onkeydown={(event) => handleEditKey(event, fetched)}
-                onblur={() => commit(fetched)}
-                spellcheck="false"
-                autocapitalize="off"
-                autocomplete="off"
-                aria-label="Edit {column}"
-              />
-              <!-- Set NULL takes the focus away from the box, which would
-                   otherwise commit what is in it first; holding the mousedown
-                   keeps the caret where it is so the click means only this. -->
-              <button
-                type="button"
-                class="flex h-5 shrink-0 items-center rounded-control border border-border bg-surface-raised px-1 text-xs font-medium text-text-muted transition-colors hover:border-border-strong hover:text-text"
-                onmousedown={(event) => event.preventDefault()}
-                onclick={() => setNull(fetched)}
-                title="Set this field to NULL"
-              >
-                NULL
-              </button>
-            </div>
+            <!-- The box takes the whole value column, which is the reason a
+                 value is edited here rather than in the grid: the width the
+                 pane spent on the value at rest is the width there is to type
+                 in. NULL keeps its own place at the end of the same line. -->
+            <input
+              class="h-6 min-w-0 flex-1 rounded-control border border-accent bg-surface-panel px-2 font-mono text-base leading-6 text-text focus:outline-none"
+              bind:value={draft}
+              use:openEditor
+              onkeydown={(event) => handleEditKey(event, fetched)}
+              onblur={() => commit(fetched)}
+              spellcheck="false"
+              autocapitalize="off"
+              autocomplete="off"
+              aria-label="Edit {column}"
+            />
+            <!-- Set NULL takes the focus away from the box, which would
+                 otherwise commit what is in it first; holding the mousedown
+                 keeps the caret where it is so the click means only this. -->
+            <button
+              type="button"
+              class="flex h-6 shrink-0 items-center rounded-control border border-border bg-surface-raised px-1.5 text-xs font-medium text-text-muted transition-colors hover:border-border-strong hover:text-text"
+              onmousedown={(event) => event.preventDefault()}
+              onclick={() => setNull(fetched)}
+              title="Set this field to NULL"
+            >
+              NULL
+            </button>
           {:else}
-            <span class="block pr-6 font-mono text-base leading-5 text-text break-words">
+            <!-- Wrapping is the browser's `break-word`, which is the rule this
+                 pane wants stated exactly: break inside a word only when the
+                 word cannot fit a line on its own. Prose still wraps at its
+                 spaces, and an email or a URL — one unbroken word — breaks
+                 rather than running off the edge, but only once the column is
+                 genuinely too narrow for it, which at the pane's own widths it
+                 no longer is. -->
+            <span
+              class="min-w-0 max-w-value flex-1 font-mono text-base leading-6 text-text break-words"
+            >
               {#if value === null}
-                <span class="text-text-subtle italic">NULL</span>
+                <!-- An absence, drawn as a thing rather than as the four
+                     letters — a column whose value is the string "NULL" must
+                     not be able to look like this one. -->
+                <span
+                  class="inline-flex h-4 items-center rounded-control border border-border bg-surface-raised px-1 align-middle font-sans text-xs font-medium tracking-wide text-text-subtle"
+                >
+                  NULL
+                </span>
               {:else}
                 {value}
               {/if}
             </span>
 
-            <div class="absolute top-1 right-1 flex items-center gap-1">
+            <!-- Beside the value, never over it: the buttons are laid out in
+                 the same line, so the value's text ends where they begin
+                 instead of running underneath them. They hold their place
+                 whether or not they are showing, which is what keeps a hover
+                 from reflowing the field it is hovering. They follow the
+                 value rather than the pane's right edge — in a pane dragged
+                 wide, or a pop-out, an edit button half a window away from
+                 the thing it edits belongs to nothing. -->
+            <div class="flex shrink-0 items-center gap-1">
               {#if editable}
                 <!-- Visible at rest, at low emphasis, so the edit gesture is
                      something a first-time visitor sees rather than something
                      only a hover discovers. Copy and undo stay hover-reveal
-                     below — the field is already carrying enough chrome. -->
+                     beside it — the field is already carrying enough chrome. -->
                 <button
                   type="button"
-                  class="flex h-5 items-center rounded-control border border-border bg-surface-raised px-1 text-text-subtle transition-colors hover:border-border-strong hover:text-text"
+                  class="flex h-6 w-6 items-center justify-center rounded-control border border-border bg-surface-raised text-text-subtle transition-colors hover:border-border-strong hover:text-text"
                   onclick={() => startEdit(at, column, value)}
                   title="Edit this value"
                   aria-label="Edit this value"
                 >
                   <svg
-                    class="h-3 w-3"
+                    class="h-3.5 w-3.5"
                     viewBox="0 0 12 12"
                     fill="none"
                     stroke="currentColor"
@@ -356,65 +418,79 @@
                   </svg>
                 </button>
               {/if}
-              <div
-                class="flex items-center gap-1 transition-opacity group-hover:opacity-100 focus-within:opacity-100 {copied ===
-                  key || dirty
-                  ? 'opacity-100'
-                  : 'opacity-0'}"
-              >
-                {#if dirty}
-                  <button
-                    type="button"
-                    class="flex h-5 items-center rounded-control border border-accent/40 bg-surface-raised px-1 text-accent transition-colors hover:bg-accent/15"
-                    onclick={() => edits?.revertCell(at, column)}
-                    title="Undo this edit"
-                    aria-label="Undo this edit"
-                  >
-                    <svg
-                      class="h-3 w-3"
-                      viewBox="0 0 12 12"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.2"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M9.75 8.5a3.5 3.5 0 0 0-3.5-3.5H2.5" />
-                      <path d="M4.25 2.75 2 5l2.25 2.25" />
-                    </svg>
-                  </button>
-                {/if}
+              {#if dirty}
                 <button
                   type="button"
-                  class="flex h-5 items-center gap-1 rounded-control border border-border bg-surface-raised px-1 text-text-muted transition-colors hover:text-text"
-                  onclick={() => copy(key, value)}
-                  title="Copy this value"
-                  aria-label="Copy this value"
+                  class="flex h-6 w-6 items-center justify-center rounded-control border border-accent/40 bg-surface-raised text-accent transition-colors hover:bg-accent/15"
+                  onclick={() => edits?.revertCell(at, column)}
+                  title="Undo this edit"
+                  aria-label="Undo this edit"
                 >
-                  {#if copied === key}
-                    <span class="px-0.5 text-xs font-medium text-success">Copied</span>
-                  {:else}
-                    <svg
-                      class="h-3 w-3"
-                      viewBox="0 0 12 12"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.2"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      aria-hidden="true"
-                    >
-                      <rect x="4.25" y="4.25" width="5.5" height="5.5" rx="1.25" />
-                      <path d="M7.75 2.25h-5.5v5.5" />
-                    </svg>
-                  {/if}
+                  <svg
+                    class="h-3.5 w-3.5"
+                    viewBox="0 0 12 12"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M9.75 8.5a3.5 3.5 0 0 0-3.5-3.5H2.5" />
+                    <path d="M4.25 2.75 2 5l2.25 2.25" />
+                  </svg>
                 </button>
-              </div>
+              {/if}
+              <!-- Copied says so by becoming a tick in the same 24px box,
+                   rather than by widening into a word: feedback that reflows
+                   the field it is reporting on is feedback that moves the
+                   thing you were reading. -->
+              <button
+                type="button"
+                class="flex h-6 w-6 items-center justify-center rounded-control border transition-opacity group-hover:opacity-100 focus-visible:opacity-100 {copied ===
+                key
+                  ? 'border-success/40 bg-surface-raised text-success opacity-100'
+                  : 'border-border bg-surface-raised text-text-subtle opacity-0 hover:border-border-strong hover:text-text'}"
+                onclick={() => copy(key, value)}
+                title="Copy this value"
+                aria-label="Copy this value"
+              >
+                {#if copied === key}
+                  <svg
+                    class="h-3.5 w-3.5"
+                    viewBox="0 0 12 12"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M2.5 6.25 5 8.75l4.5-5.5" />
+                  </svg>
+                {:else}
+                  <svg
+                    class="h-3.5 w-3.5"
+                    viewBox="0 0 12 12"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <rect x="4.25" y="4.25" width="5.5" height="5.5" rx="1.25" />
+                    <path d="M7.75 2.25h-5.5v5.5" />
+                  </svg>
+                {/if}
+              </button>
             </div>
           {/if}
         </div>
       {/each}
+      {#if comparing}
+        <div class="border-b border-border/60"></div>
+      {/if}
     {/each}
   </div>
 </div>

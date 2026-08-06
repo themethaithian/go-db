@@ -27,13 +27,23 @@ export const RESULTS_MIN_PX = 160;
  * sits beside. One pair of constants for both: the pane is the same
  * component in both views, and there is nothing about either view that
  * wants a different floor.
+ *
+ * The pane's floor is what it costs to read one value, not what it costs to
+ * draw one: a field name column, a value, and the field's own buttons beside
+ * it. Below this the values start wrapping mid-word, which is the one thing
+ * the pane must never do — so the floor is set where an email still fits on
+ * a line (about twenty characters of the mono face), and the splitter simply
+ * stops there rather than letting the pane shrink into uselessness.
  */
-export const DETAIL_MIN_PX = 220;
+export const DETAIL_MIN_PX = 360;
 export const GRID_MIN_PX = 240;
 
 /**
  * Minimum width of the record pane while it is comparing rows: two value
- * columns squeezed into one row's worth of pane compare nothing legibly.
+ * columns squeezed into one row's worth of pane compare nothing legibly, so
+ * the floor is the name column plus two columns at their own minimum. Wider
+ * columns than that are the pane's own doing — they are sized to what is in
+ * them — and what will not fit is scrolled to.
  */
 export const COMPARE_MIN_PX = 400;
 
@@ -50,9 +60,14 @@ type Layout = {
 
 const DEFAULTS: Layout = {
   explorerTreeWidth: 244,
-  explorerDetailWidth: 300,
+  explorerDetailWidth: 400,
   editorQueryHeight: 236,
-  editorDetailWidth: 300,
+  // The pane opens a step above its own floor, wide enough that the values in
+  // it are read rather than decoded — an address or an email on one line,
+  // with the field's buttons beside the text and not over it. Narrower is a
+  // drag away; opening cramped by default is a first impression nobody drags
+  // back from.
+  editorDetailWidth: 400,
 };
 
 const STORAGE_KEY = "go-db:workspace-layout";
@@ -71,9 +86,21 @@ function restore(): Layout {
     const parsed = JSON.parse(raw) as Partial<Layout>;
     return {
       explorerTreeWidth: size(parsed.explorerTreeWidth, DEFAULTS.explorerTreeWidth),
-      explorerDetailWidth: size(parsed.explorerDetailWidth, DEFAULTS.explorerDetailWidth),
+      // Widths remembered from before a floor moved are floors that were
+      // agreed to under the old layout, not preferences for the new one: a
+      // pane stored at 240px would come back too narrow to read a value in,
+      // with nothing on screen saying why. Only the floor is applied here —
+      // the ceiling depends on how wide the window is, which the views clamp
+      // against once they have measured themselves.
+      explorerDetailWidth: atLeast(
+        size(parsed.explorerDetailWidth, DEFAULTS.explorerDetailWidth),
+        DETAIL_MIN_PX,
+      ),
       editorQueryHeight: size(parsed.editorQueryHeight, DEFAULTS.editorQueryHeight),
-      editorDetailWidth: size(parsed.editorDetailWidth, DEFAULTS.editorDetailWidth),
+      editorDetailWidth: atLeast(
+        size(parsed.editorDetailWidth, DEFAULTS.editorDetailWidth),
+        DETAIL_MIN_PX,
+      ),
     };
   } catch {
     return { ...DEFAULTS };
@@ -82,6 +109,10 @@ function restore(): Layout {
 
 function size(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function atLeast(value: number, floor: number): number {
+  return Math.max(value, floor);
 }
 
 export const layout = $state<Layout>(restore());

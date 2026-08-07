@@ -12,6 +12,20 @@ Existing database clients are heavy, ugly, and risky to trust with AI agents.
 
 **Risky**: Giving an AI agent raw database credentials is scary. It can silently INSERT, UPDATE, DELETE, or DROP. go-db enforces a single, inescapable Approval Gate: reads flow freely; mutations from ANY Origin (human or AI) must pass it. The differentiator is compatibility—works with Claude Code, Claude Desktop, Cursor, Zed, or any MCP-capable agent—not lock-in.
 
+## Install
+
+1. Download the latest `go-db-macos-universal.zip` from [GitHub Releases](https://github.com/themethaithian/go-db/releases).
+2. Unzip it, then drag `go-db.app` to `/Applications`.
+3. First launch: the build isn't signed/notarized yet (no Apple Developer account in this round), so macOS Gatekeeper will block a plain double-click. Either right-click `go-db.app` → **Open** and confirm, or clear the quarantine flag yourself:
+   ```
+   xattr -d com.apple.quarantine /Applications/go-db.app
+   ```
+4. Open the app and add a Profile for your database.
+5. Wire up an MCP-capable agent (Claude Code, Claude Desktop, Cursor, Zed, …). Each MCP server is pinned to one Profile — use the Profile's name as the last argument:
+   ```
+   claude mcp add go-db-myprofile -- /Applications/go-db.app/Contents/MacOS/go-db mcp myprofile
+   ```
+
 ## How it works
 
 ### Humans: Inline Confirm

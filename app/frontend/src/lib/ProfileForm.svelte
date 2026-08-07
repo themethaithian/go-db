@@ -1,5 +1,6 @@
 <script lang="ts">
   import { db } from "../../wailsjs/go/models";
+  import { ExecutablePath } from "../../wailsjs/go/app/App";
   import type { ConnectionOutcome } from "./connection";
 
   // Create/edit form for a single Profile. `profile` is null when creating;
@@ -53,6 +54,89 @@
   let sshUser = $state("");
   let sshKeyFile = $state("");
 
+  // The running app's own executable path, for the MCP setup popover below.
+  // Fetched once on mount rather than on first open — the popover must never
+  // block on it (CLAUDE.md: no ceremony, no spinner-gated affordances), so
+  // it starts resolving immediately and the popover just renders whatever
+  // is known yet. null means "still resolving"; the copy buttons stay
+  // disabled and the code blocks show a placeholder until it lands.
+  let exePath = $state<string | null>(null);
+  $effect(() => {
+    ExecutablePath()
+      .then((path) => (exePath = path))
+      .catch(() => {
+        // Left null: the popover's placeholder already reads fine as "not
+        // available yet", and there's nothing actionable to tell the human.
+      });
+  });
+
+  // The MCP setup popover: a small panel of copyable setup snippets for the
+  // saved profile, opened from the footer's MCP button. Closed by an outside
+  // click or Esc, same as the Editor's Saved-queries popover.
+  let mcpPopoverOpen = $state(false);
+  let mcpPanel = $state<HTMLDivElement | undefined>(undefined);
+
+  function toggleMcpPopover() {
+    mcpPopoverOpen = !mcpPopoverOpen;
+  }
+
+  $effect(() => {
+    if (!mcpPopoverOpen) return;
+    function onPointerDown(event: MouseEvent) {
+      if (mcpPanel && !mcpPanel.contains(event.target as Node)) {
+        mcpPopoverOpen = false;
+      }
+    }
+    function onKeydown(event: KeyboardEvent) {
+      if (event.key === "Escape") mcpPopoverOpen = false;
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeydown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeydown);
+    };
+  });
+
+  // The two setup snippets, built from the saved Profile's name (locked
+  // while editing, so `name` is always the saved value) and the executable
+  // path once it has resolved. Server name mirrors the command's own
+  // convention: "godb-<profile>".
+  let mcpServerName = $derived(`godb-${name}`);
+  let claudeCodeCommand = $derived(
+    exePath !== null ? `claude mcp add ${mcpServerName} -- ${exePath} mcp ${name}` : null,
+  );
+  let claudeDesktopJson = $derived(
+    exePath !== null
+      ? JSON.stringify(
+          { mcpServers: { [mcpServerName]: { command: exePath, args: ["mcp", name] } } },
+          null,
+          2,
+        )
+      : null,
+  );
+
+  /** How long "Copied" stays up after a copy — matches RecordPane. */
+  const MCP_COPIED_MS = 1200;
+  let mcpCopied = $state<"code" | "desktop" | null>(null);
+  let mcpCopyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function copyMcp(key: "code" | "desktop", value: string | null) {
+    if (value === null) return;
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      return;
+    }
+    mcpCopied = key;
+    if (mcpCopyTimer !== null) clearTimeout(mcpCopyTimer);
+    mcpCopyTimer = setTimeout(() => (mcpCopied = null), MCP_COPIED_MS);
+  }
+
+  $effect(() => () => {
+    if (mcpCopyTimer !== null) clearTimeout(mcpCopyTimer);
+  });
+
   $effect(() => {
     name = profile?.Name ?? "";
     host = profile?.Host ?? "";
@@ -61,6 +145,7 @@
     database = profile?.Database ?? "";
     password = "";
     confirmingDelete = false;
+    mcpPopoverOpen = false;
 
     sshEnabled = profile?.SSH != null;
     sshHost = profile?.SSH?.Host ?? "";
@@ -117,6 +202,65 @@
   const primaryButton = `${buttonBase} bg-accent text-white hover:bg-accent-hover`;
   const secondaryButton = `${buttonBase} border border-border bg-surface-raised text-text hover:border-border-strong hover:bg-surface-overlay`;
 </script>
+
+<!--
+  One copyable setup block for the MCP popover: a label, a copy button using
+  the same copied-tick pattern as the record pane, and a mono block that
+  wraps rather than scrolling — the whole point is a command or JSON snippet
+  a human can read and paste without fighting a scrollbar. content is null
+  while the executable path is still resolving, which the placeholder text
+  says outright and the copy button reflects by staying disabled.
+-->
+{#snippet mcpBlock(label: string, key: "code" | "desktop", content: string | null)}
+  <div class="flex flex-col gap-1.5">
+    <div class="flex items-center justify-between">
+      <span class="text-xs font-medium text-text-muted">{label}</span>
+      <button
+        type="button"
+        class="flex h-6 w-6 shrink-0 items-center justify-center rounded-control border transition-colors {mcpCopied ===
+        key
+          ? 'border-success/40 bg-surface-raised text-success'
+          : 'border-border bg-surface-raised text-text-subtle hover:border-border-strong hover:text-text'}"
+        onclick={() => copyMcp(key, content)}
+        disabled={content === null}
+        title="Copy to clipboard"
+        aria-label="Copy {label} snippet"
+      >
+        {#if mcpCopied === key}
+          <svg
+            class="h-3.5 w-3.5"
+            viewBox="0 0 12 12"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M2.5 6.25 5 8.75l4.5-5.5" />
+          </svg>
+        {:else}
+          <svg
+            class="h-3.5 w-3.5"
+            viewBox="0 0 12 12"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="4.25" y="4.25" width="5.5" height="5.5" rx="1.25" />
+            <path d="M7.75 2.25h-5.5v5.5" />
+          </svg>
+        {/if}
+      </button>
+    </div>
+    <pre
+      class="max-h-32 overflow-auto rounded-control border border-border bg-surface px-2.5 py-2 font-mono text-xs whitespace-pre-wrap break-all text-text">{content ??
+        "Resolving go-db's executable path…"}</pre>
+  </div>
+{/snippet}
 
 <form class="rounded-panel border border-border bg-surface-panel shadow-panel" onsubmit={handleSubmit}>
   <header class="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
@@ -267,6 +411,37 @@
       >
         {isConnected ? "Disconnect" : "Connect"}
       </button>
+
+      <span class="mx-1 h-5 w-px shrink-0 bg-border"></span>
+
+      <div class="relative shrink-0" bind:this={mcpPanel}>
+        <button
+          type="button"
+          class={secondaryButton}
+          aria-haspopup="true"
+          aria-expanded={mcpPopoverOpen}
+          onclick={toggleMcpPopover}
+        >
+          MCP
+        </button>
+
+        {#if mcpPopoverOpen}
+          <!-- Opens upward: the footer sits at the bottom of the panel, and a
+               panel opening below it would clip against the viewport far
+               more often than one opening over the form it belongs to. -->
+          <div
+            class="absolute bottom-full left-0 z-10 mb-1.5 w-96 max-w-[90vw] rounded-panel border border-border bg-surface-panel p-3 shadow-panel"
+            role="dialog"
+            aria-label="MCP setup for {name}"
+          >
+            <div class="flex flex-col gap-3">
+              {@render mcpBlock("Claude Code", "code", claudeCodeCommand)}
+              {@render mcpBlock("Claude Desktop", "desktop", claudeDesktopJson)}
+              <p class="text-xs text-text-subtle">go-db must be running for the MCP server to work.</p>
+            </div>
+          </div>
+        {/if}
+      </div>
 
       <span class="flex-1"></span>
 

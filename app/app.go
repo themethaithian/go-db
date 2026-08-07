@@ -8,6 +8,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -187,6 +188,26 @@ func (a *App) MemoryUsageMB() float64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return float64(m.Sys) / (1024 * 1024)
+}
+
+// ExecutablePath returns the absolute path to the running app's own
+// executable, with symlinks resolved. It backs the Connections view's MCP
+// setup popover (issue #29): both the `claude mcp add` command and the
+// Claude Desktop JSON snippet need the literal path to this binary, and
+// only the running process knows what that is — a build-time constant would
+// go stale the moment the .app bundle moved. This is a fact about how the
+// process was launched, not domain logic, so it lives here in app/ rather
+// than internal/.
+func (a *App) ExecutablePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("app: resolving executable path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("app: resolving executable symlinks: %w", err)
+	}
+	return resolved, nil
 }
 
 // Ready is called once by the frontend on its first mount. It logs

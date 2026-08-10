@@ -31,19 +31,38 @@ import (
 // It tracks the connections it hands out so a test can assert lifecycle:
 // OpenProfiles reports what is open right now, Opens how many were ever
 // opened. It is safe for concurrent use.
+//
+// A Profile can have more than one connection open at a time, each on its own
+// default schema — that is what the Connection Registry's sibling connections
+// are — so everything recorded per Profile is also recorded per (Profile, DSN
+// dbname). Scripting stays per Profile, since a fake server answers the same
+// whichever schema it was opened on; the *In accessors are what a test asks
+// when the question is which connection a statement went down.
 type FakeDriver struct {
 	mu        sync.Mutex
 	passwords map[string]string       // profiles that accept a connection
 	failures  map[string]error        // forced outcomes, checked first
 	open      map[string]int          // currently open connections, by Profile
+	openIn    map[target]int          // the same, by Profile and DSN dbname
 	answers   map[string]db.ResultSet // scripted read results, by Profile
 	byQuery   map[string]db.ResultSet // scripted read results, by Profile and statement
 	refusals  map[string]error        // scripted read failures, by Profile
 	queries   map[string][]string     // statements ReadQuery was given
+	queriesIn map[target][]string     // the same, by Profile and DSN dbname
 	affected  map[string]int64        // scripted affected-row counts, by Profile
 	execFails map[string]error        // scripted write failures, by Profile
 	execs     map[string][]string     // statements Exec was given
+	execsIn   map[target][]string     // the same, by Profile and DSN dbname
 	opens     int
+}
+
+// target is one connection's identity as this fake sees it: the Profile it was
+// opened for and the schema its DSN named. It is the fake's mirror of the
+// Registry's own key, and it is what makes "which connection ran this" a
+// question a test can ask.
+type target struct {
+	profile  string
+	database string
 }
 
 // NewFakeDriver returns a FakeDriver for which no Profile is reachable yet.
@@ -52,13 +71,16 @@ func NewFakeDriver() *FakeDriver {
 		passwords: make(map[string]string),
 		failures:  make(map[string]error),
 		open:      make(map[string]int),
+		openIn:    make(map[target]int),
 		answers:   make(map[string]db.ResultSet),
 		byQuery:   make(map[string]db.ResultSet),
 		refusals:  make(map[string]error),
 		queries:   make(map[string][]string),
+		queriesIn: make(map[target][]string),
 		affected:  make(map[string]int64),
 		execFails: make(map[string]error),
 		execs:     make(map[string][]string),
+		execsIn:   make(map[target][]string),
 	}
 }
 
@@ -112,20 +134,31 @@ func (d *FakeDriver) Execs(profileName string) []string {
 	return append([]string(nil), d.execs[profileName]...)
 }
 
+// ExecsIn is Execs narrowed to the connection whose DSN named database — the
+// evidence that a confirmed mutation ran on the schema it was classified
+// under, and not on the Profile's own connection beside it.
+func (d *FakeDriver) ExecsIn(profileName, database string) []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return append([]string(nil), d.execsIn[target{profileName, database}]...)
+}
+
 // exec performs one write for profileName, recording it first. A Profile with
 // no scripted outcome still succeeds, reporting no rows changed: a mutation
 // reaching a database that was never told what to say is a test bug about
 // Execs, and it should be read there rather than as a failed statement.
-func (d *FakeDriver) exec(profileName, sql string) (int64, error) {
+func (d *FakeDriver) exec(at target, sql string) (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.execs[profileName] = append(d.execs[profileName], sql)
+	d.execs[at.profile] = append(d.execs[at.profile], sql)
+	d.execsIn[at] = append(d.execsIn[at], sql)
 
-	if err, failed := d.execFails[profileName]; failed {
+	if err, failed := d.execFails[at.profile]; failed {
 		return 0, err
 	}
-	return d.affected[profileName], nil
+	return d.affected[at.profile], nil
 }
 
 // RejectWrites makes profileName's server behave like the Approval Gate's
@@ -155,23 +188,34 @@ func (d *FakeDriver) Queries(profileName string) []string {
 	return append([]string(nil), d.queries[profileName]...)
 }
 
-// readQuery answers one read for profileName, recording it first.
-func (d *FakeDriver) readQuery(profileName, sql string) (db.ResultSet, error) {
+// QueriesIn is Queries narrowed to the connection whose DSN named database —
+// the evidence that a statement, or an Impact Preview's count, went down the
+// connection for the schema it was submitted against.
+func (d *FakeDriver) QueriesIn(profileName, database string) []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.queries[profileName] = append(d.queries[profileName], sql)
+	return append([]string(nil), d.queriesIn[target{profileName, database}]...)
+}
 
-	if err, refused := d.refusals[profileName]; refused {
+// readQuery answers one read for at's connection, recording it first.
+func (d *FakeDriver) readQuery(at target, sql string) (db.ResultSet, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.queries[at.profile] = append(d.queries[at.profile], sql)
+	d.queriesIn[at] = append(d.queriesIn[at], sql)
+
+	if err, refused := d.refusals[at.profile]; refused {
 		return db.ResultSet{}, err
 	}
-	if answer, scripted := d.byQuery[profileName+"\x00"+sql]; scripted {
+	if answer, scripted := d.byQuery[at.profile+"\x00"+sql]; scripted {
 		return answer, nil
 	}
-	if answer, scripted := d.answers[profileName]; scripted {
+	if answer, scripted := d.answers[at.profile]; scripted {
 		return answer, nil
 	}
-	return db.ResultSet{}, fmt.Errorf("dbtest: profile %q has no scripted result for %q", profileName, sql)
+	return db.ResultSet{}, fmt.Errorf("dbtest: profile %q has no scripted result for %q", at.profile, sql)
 }
 
 // Accept makes profileName reachable, answering to exactly this password. A
@@ -210,6 +254,27 @@ func (d *FakeDriver) OpenProfiles() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// OpenDatabases returns the DSN dbname of every connection currently open for
+// profileName, ordered by name and with one entry per connection — so two
+// connections on the same schema appear twice, which is what a leaked sibling
+// looks like.
+func (d *FakeDriver) OpenDatabases(profileName string) []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	databases := make([]string, 0, len(d.openIn))
+	for at, count := range d.openIn {
+		if at.profile != profileName {
+			continue
+		}
+		for i := 0; i < count; i++ {
+			databases = append(databases, at.database)
+		}
+	}
+	sort.Strings(databases)
+	return databases
 }
 
 // Opens returns how many connections the driver has handed out in total,
@@ -255,17 +320,21 @@ func (d *FakeDriver) Open(ctx context.Context, profile db.Profile, password stri
 		return nil, fmt.Errorf("%w: wrong password for profile %q", db.ErrAuthFailed, profile.Name)
 	}
 
+	// profile.Database is the schema this connection's DSN names, which is how
+	// a sibling connection differs from the Profile's own.
+	at := target{profile: profile.Name, database: profile.Database}
 	d.open[profile.Name]++
+	d.openIn[at]++
 	d.opens++
-	return &fakeConn{driver: d, profile: profile.Name}, nil
+	return &fakeConn{driver: d, at: at}, nil
 }
 
 // fakeConn is one connection handed out by a FakeDriver. It reports itself
 // closed to the driver so lifecycle assertions see it, and refuses use after
 // close so a test that keeps a stale connection fails loudly.
 type fakeConn struct {
-	driver  *FakeDriver
-	profile string
+	driver *FakeDriver
+	at     target
 
 	mu     sync.Mutex
 	closed bool
@@ -292,7 +361,7 @@ func (c *fakeConn) ReadQuery(ctx context.Context, sql string) (db.ResultSet, err
 	if err := ctx.Err(); err != nil {
 		return db.ResultSet{}, err
 	}
-	return c.driver.readQuery(c.profile, sql)
+	return c.driver.readQuery(c.at, sql)
 }
 
 func (c *fakeConn) Exec(ctx context.Context, sql string) (int64, error) {
@@ -306,7 +375,7 @@ func (c *fakeConn) Exec(ctx context.Context, sql string) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	return c.driver.exec(c.profile, sql)
+	return c.driver.exec(c.at, sql)
 }
 
 func (c *fakeConn) Close() error {
@@ -320,7 +389,8 @@ func (c *fakeConn) Close() error {
 
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
-	c.driver.open[c.profile]--
+	c.driver.open[c.at.profile]--
+	c.driver.openIn[c.at]--
 	return nil
 }
 

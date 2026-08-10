@@ -39,8 +39,15 @@ const ApprovalTimeout = 2 * time.Minute
 // the moment the human's confirmation appeared, not the moment a timer was
 // first wound.
 type Pending struct {
-	ID             string         `json:"id"`
-	Profile        string         `json:"profile"`
+	ID      string `json:"id"`
+	Profile string `json:"profile"`
+	// Database is the schema the statement was classified against and must run
+	// in — the Connection Registry's connection for it. Blank is the Profile's
+	// own, which is what everything but the editor's database picker submits.
+	// It travels with the statement because a mutation confirmed on some other
+	// connection than the one it was previewed on is a different statement:
+	// unqualified SQL would resolve somewhere else entirely.
+	Database       string         `json:"database,omitempty"`
 	SQL            string         `json:"sql"`
 	Origin         Origin         `json:"origin"`
 	Classification Classification `json:"classification"`

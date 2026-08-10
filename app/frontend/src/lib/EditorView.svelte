@@ -42,11 +42,21 @@
     documents,
     openDocument,
     renameDocument,
+    writeDatabase,
     writeSql,
   } from "./documents.svelte";
   import { deleteSaved, openSaved, saved, saveQuery } from "./saved.svelte";
   import { editorRanges, statementAt, subjectTable, type StatementRange } from "./statements";
-  import { ensureColumns, ensureIndexes, ensureTables, findTable, tablesOf } from "./schema.svelte";
+  import {
+    configuredDatabase,
+    databasesOf,
+    ensureColumns,
+    ensureDatabases,
+    ensureIndexes,
+    ensureTables,
+    findTable,
+    tablesOf,
+  } from "./schema.svelte";
   import { mentionedTables, type CompletionSchema } from "./completion";
   import { RowEdits } from "./edits.svelte";
   import { editability, selectTarget } from "./mutate";
@@ -66,13 +76,6 @@
     onGoToConnections: () => void;
   } = $props();
 
-  // The schema the Editor lives in: the connection's own default, which is the
-  // one an unqualified table name in a typed statement resolves against. The
-  // Explorer's tree can point anywhere on the server, but nothing here can —
-  // statements run as written, so the completion list and the primary key that
-  // decides editability must come from the same schema they will.
-  const DEFAULT_SCHEMA = "";
-
   // The seed is read once, and opens a tab of its own named after the table it
   // reads — deliberately not watched, and never written over an existing
   // document. Whatever the human has in their tabs is theirs; a handover is a
@@ -84,6 +87,23 @@
   }
 
   let profileName = $state<string | null>(handover?.profile ?? null);
+
+  // The document in front, and its text. Both are read-through: typing goes
+  // back to the store, which is what makes it survive a view switch.
+  let doc = $derived(documents.active);
+  let sql = $derived(doc.sql);
+
+  // The schema this tab lives in: the database its statements run against, and
+  // so the one an unqualified table name in them resolves in. It belongs to the
+  // document, not to this view — see documents.svelte.ts — and "" is the
+  // Profile's own connection.
+  //
+  // Everything downstream of it follows it: the completion list, the primary
+  // key that decides editability, and the connection a save's UPDATE is sent
+  // on. They must, because a statement runs as written and the schema it means
+  // is whichever one the connection is open on.
+  let database = $derived(doc.database);
+
   let classification = $state<guard.Classification | null>(null);
   let running = $state(false);
   let result = $state<service.QueryResult | null>(null);
@@ -125,16 +145,16 @@
   let editNode = $derived(
     profileName === null || editTable === null
       ? null
-      : findTable(profileName, DEFAULT_SCHEMA, editTable),
+      : findTable(profileName, database, editTable),
   );
   let editable = $derived(editability(editTable, shownColumns, editNode?.indexes ?? null));
   let readOnlyHint = $derived(editable.editable ? null : editable.reason);
 
   $effect(() => {
     if (profileName === null || editTable === null) return;
-    ensureTables(profileName, DEFAULT_SCHEMA);
+    ensureTables(profileName, database);
     const node = editNode;
-    if (node !== null) ensureIndexes(profileName, DEFAULT_SCHEMA, node);
+    if (node !== null) ensureIndexes(profileName, database, node);
   });
 
   // A confirm nobody will answer must not be left in the gate's queue: leaving
@@ -145,11 +165,6 @@
     if (seed !== null) onSeedConsumed();
   });
 
-  // The document in front, and its text. Both are read-through: typing goes
-  // back to the store, which is what makes it survive a view switch.
-  let doc = $derived(documents.active);
-  let sql = $derived(doc.sql);
-
   // What SqlEditor's autocomplete knows about the connected Profile's
   // schema: table names once they load, and — via columnsFor — whichever
   // table's columns the human has asked for (see completion.ts for why
@@ -159,11 +174,11 @@
   let completionSchema = $derived.by((): CompletionSchema | null => {
     if (profileName === null) return null;
     const profile = profileName;
-    const tableNames = (tablesOf(profile, DEFAULT_SCHEMA) ?? []).map((table) => table.name);
+    const tableNames = (tablesOf(profile, database) ?? []).map((table) => table.name);
     return {
       tables: tableNames,
       columnsFor: (table) =>
-        findTable(profile, DEFAULT_SCHEMA, table)?.columns?.map((column) => column.name),
+        findTable(profile, database, table)?.columns?.map((column) => column.name),
     };
   });
 
@@ -171,7 +186,7 @@
   // expands it in the Database tree — autocomplete needs the table list
   // before there is a table name to complete.
   $effect(() => {
-    if (profileName !== null) ensureTables(profileName, DEFAULT_SCHEMA);
+    if (profileName !== null) ensureTables(profileName, database);
   });
 
   // The lazy half of column completion: for every table this buffer already
@@ -183,10 +198,42 @@
     if (profileName === null) return;
     const profile = profileName;
     for (const table of mentionedTables(sql, completionSchema?.tables ?? [])) {
-      const node = findTable(profile, DEFAULT_SCHEMA, table);
-      if (node !== null) ensureColumns(profile, DEFAULT_SCHEMA, node);
+      const node = findTable(profile, database, table);
+      if (node !== null) ensureColumns(profile, database, node);
     }
   });
+
+  // The databases the picker offers, and what the default one is called.
+  //
+  // The list comes from the same cache the Database tree fills, asked for
+  // without expanding anything in it. The Profile's own schema is left out of
+  // it: that schema is already what "" means, and offering it twice would be
+  // two options that do the same thing. A Profile that names no database has
+  // no such schema, so the default is the bare connection and says so.
+  $effect(() => {
+    if (profileName !== null) ensureDatabases(profileName);
+  });
+
+  let home = $derived(profileName === null ? "" : configuredDatabase(profileName));
+  let databaseOptions = $derived.by(() => {
+    const listed =
+      (profileName === null ? null : databasesOf(profileName))?.filter((name) => name !== home) ??
+      [];
+    // The tab's own database is offered whether or not the list has arrived —
+    // and whether or not the schema still exists. The picker has to show what
+    // the statements in this tab will really run against; falling quietly back
+    // to the default while they run somewhere else is the one thing it must
+    // never do.
+    return database !== "" && database !== home && !listed.includes(database)
+      ? [database, ...listed]
+      : listed;
+  });
+  let defaultLabel = $derived(home === "" ? "default schema" : home);
+
+  // What the picker shows as chosen. A tab holding the Profile's own schema by
+  // name is holding the default — the backend reads the two the same way, and
+  // so should the human.
+  let selectedDatabase = $derived(database === home ? "" : database);
 
   // Where the caret is and what is selected under it, as CodeMirror last
   // reported. A fresh document starts at 0, which is where CodeMirror puts the
@@ -341,7 +388,7 @@
   async function run() {
     const statement = target;
     if (!canRun || profileName === null) return;
-    await execute(profileName, statement);
+    await execute(profileName, database, statement);
   }
 
   // Whether there is anything to pretty-print — same rule Save uses, since
@@ -380,10 +427,13 @@
   // was typed. It is the same read that produced the rows in the first place.
   async function rerun() {
     if (profileName === null || ranSql === "" || running) return;
-    await execute(profileName, ranSql);
+    await execute(profileName, database, ranSql);
   }
 
-  async function execute(profile: string, statement: string) {
+  // The Profile and database are passed in rather than read here: a run is
+  // aimed at where the human was when they started it, and an await in the
+  // middle is long enough for either to change.
+  async function execute(profile: string, schema: string, statement: string) {
     running = true;
     // Rows picked out of the old result set cannot survive a new one — the
     // indices would land on some other rows, or on none — and neither can
@@ -392,7 +442,7 @@
     edits.abandon();
     edits.revert();
     try {
-      result = await RunQuery(profile, statement);
+      result = await RunQuery(profile, schema, statement);
       ranSql = statement;
     } finally {
       running = false;
@@ -408,6 +458,9 @@
     if (profile === null || !editable.editable) return;
     const saved = await edits.save({
       profileName: profile,
+      // The statement runs on the connection for this tab's database, and so
+      // names its table bare — the same statement a human would have typed.
+      runIn: database,
       table: editable.table,
       keyColumns: editable.keyColumns,
       columns: shownColumns,
@@ -464,14 +517,16 @@
 
   // A withheld mutation is the statement the gate previewed, by ID — not
   // whatever text is in the editor a moment later. If the human edits the SQL,
-  // switches Profile, or switches to another tab while its Inline Confirm is
-  // open, that statement no longer reflects their intent, so it is cancelled
-  // rather than left to be confirmed stale. The pending's own ID is read with
-  // untrack so this effect only fires on those three changing, not on result
-  // changing (which it itself causes).
+  // switches Profile or database, or switches to another tab while its Inline
+  // Confirm is open, that statement no longer reflects their intent, so it is
+  // cancelled rather than left to be confirmed stale — and a database it was
+  // previewed against is as much a part of what it would do as its text is.
+  // The pending's own ID is read with untrack so this effect only fires on
+  // those changing, not on result changing (which it itself causes).
   $effect(() => {
     sql;
     profileName;
+    database;
     doc.id;
     const pending = untrack(() => result);
     if (pending?.status === "requires_confirmation" && pending.pending_id) {
@@ -623,6 +678,25 @@
           {/each}
         </select>
       </label>
+
+      <!-- The database this tab's statements run in. Beside the Profile
+           because it is the other half of the same answer: which connection.
+           It is per tab and persisted with it, so two tabs can be two
+           different schemas at once. -->
+      <label class="flex items-center gap-2 text-xs font-medium text-text-muted">
+        Database
+        <select
+          class="h-8 max-w-52 rounded-control border border-border bg-surface-raised px-2 text-base font-normal text-text transition-colors hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={profileName === null}
+          value={selectedDatabase}
+          onchange={(event) => writeDatabase(event.currentTarget.value)}
+        >
+          <option value="">{defaultLabel}</option>
+          {#each databaseOptions as name (name)}
+            <option value={name}>{name}</option>
+          {/each}
+        </select>
+      </label>
     {/if}
 
     <span class="flex min-w-0 items-center gap-2">
@@ -760,7 +834,7 @@
             class="my-1 ml-1 flex w-6 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-raised hover:text-text"
             title="New query tab"
             aria-label="New query tab"
-            onclick={() => openDocument()}
+            onclick={() => openDocument(undefined, undefined, database)}
           >
             <svg
               class="h-3 w-3"

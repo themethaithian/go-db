@@ -138,12 +138,17 @@ func (a *App) SplitStatements(sql string) []guard.StatementSpan {
 	return a.svc.SplitStatements(sql)
 }
 
-// RunQuery submits sql on the named Profile from the SQL editor. The editor
-// is the human Origin — an AI query arrives only through the MCP server,
-// which is not wired in yet — so this binding hardcodes guard.OriginHuman
-// rather than accepting it as a parameter.
-func (a *App) RunQuery(profileName, sql string) service.QueryResult {
-	return a.svc.RunQuery(a.ctx, profileName, sql, guard.OriginHuman)
+// RunQuery submits sql on the named Profile and database from the SQL editor.
+// The editor is the human Origin — an AI query arrives only through the MCP
+// server, which is not wired in yet — so this binding hardcodes
+// guard.OriginHuman rather than accepting it as a parameter.
+//
+// An empty database is the Profile's own connection, which is what the editor
+// sends until a human picks a database and what the Explorer always sends. A
+// named one runs the statement on a connection whose default schema it is, so
+// unqualified SQL means what the human picking it expects.
+func (a *App) RunQuery(profileName, database, sql string) service.QueryResult {
+	return a.svc.RunQuery(a.ctx, profileName, database, sql, guard.OriginHuman)
 }
 
 // ConfirmPending runs the mutation withheld under id — the Inline Confirm's

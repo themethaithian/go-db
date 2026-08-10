@@ -97,7 +97,7 @@ func TestIntegrationInlineConfirmUpdate(t *testing.T) {
 	ctx := timeout(t)
 
 	const update = "UPDATE confirm_users SET name = 'archived' WHERE stale = 1"
-	pending := svc.RunQuery(ctx, "local", update, guard.OriginHuman)
+	pending := svc.RunQuery(ctx, "local", "", update, guard.OriginHuman)
 
 	if pending.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q, want %q (message: %s)", pending.Status, service.QueryRequiresConfirmation, pending.Message)
@@ -164,7 +164,7 @@ func TestIntegrationAdvisoryCountCanDiverge(t *testing.T) {
 	svc, auditDir := confirming(t, host, port)
 	ctx := timeout(t)
 
-	pending := svc.RunQuery(ctx, "local", "UPDATE diverge_users SET name = 'archived' WHERE stale = 1", guard.OriginHuman)
+	pending := svc.RunQuery(ctx, "local", "", "UPDATE diverge_users SET name = 'archived' WHERE stale = 1", guard.OriginHuman)
 	if pending.Preview == nil || pending.Preview.Count != 3 {
 		t.Fatalf("preview = %+v, want an advisory count of 3", pending.Preview)
 	}
@@ -209,7 +209,7 @@ func TestIntegrationDeleteWithoutWhereShowsTheWholeTable(t *testing.T) {
 	svc, _ := confirming(t, host, port)
 	ctx := timeout(t)
 
-	pending := svc.RunQuery(ctx, "local", "DELETE FROM whole_table", guard.OriginHuman)
+	pending := svc.RunQuery(ctx, "local", "", "DELETE FROM whole_table", guard.OriginHuman)
 
 	if pending.Preview == nil || !pending.Preview.Available {
 		t.Fatalf("preview = %+v, want an available preview", pending.Preview)
@@ -243,7 +243,7 @@ func TestIntegrationSampleIsCappedAtTheLimit(t *testing.T) {
 	svc, _ := confirming(t, host, port)
 	ctx := timeout(t)
 
-	pending := svc.RunQuery(ctx, "local", "UPDATE many_affected SET name = 'x'", guard.OriginHuman)
+	pending := svc.RunQuery(ctx, "local", "", "UPDATE many_affected SET name = 'x'", guard.OriginHuman)
 
 	if pending.Preview == nil || pending.Preview.Count != 50 {
 		t.Fatalf("preview = %+v, want an advisory count of 50", pending.Preview)
@@ -266,7 +266,7 @@ func TestIntegrationDDLIsConfirmedWithoutAPreview(t *testing.T) {
 	ctx := timeout(t)
 
 	const ddl = "CREATE TABLE made_by_confirmation (id INT PRIMARY KEY)"
-	pending := svc.RunQuery(ctx, "local", ddl, guard.OriginHuman)
+	pending := svc.RunQuery(ctx, "local", "", ddl, guard.OriginHuman)
 
 	if pending.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q, want %q (message: %s)", pending.Status, service.QueryRequiresConfirmation, pending.Message)
@@ -311,7 +311,7 @@ func TestIntegrationCancelLeavesTheDataAlone(t *testing.T) {
 	svc, auditDir := confirming(t, host, port)
 	ctx := timeout(t)
 
-	pending := svc.RunQuery(ctx, "local", "DELETE FROM cancelled_users", guard.OriginHuman)
+	pending := svc.RunQuery(ctx, "local", "", "DELETE FROM cancelled_users", guard.OriginHuman)
 	if pending.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q (message: %s)", pending.Status, pending.Message)
 	}
@@ -336,7 +336,7 @@ func TestIntegrationCancelLeavesTheDataAlone(t *testing.T) {
 	}
 
 	// Reads on the same Profile still work afterwards.
-	read := svc.RunQuery(ctx, "local", "SELECT name FROM cancelled_users ORDER BY id", guard.OriginHuman)
+	read := svc.RunQuery(ctx, "local", "", "SELECT name FROM cancelled_users ORDER BY id", guard.OriginHuman)
 	if read.Status != service.QueryOK || len(read.Rows) != 2 {
 		t.Errorf("reading after a cancellation: status=%q rows=%d", read.Status, len(read.Rows))
 	}
@@ -357,7 +357,7 @@ func TestIntegrationPreviewHoldsNoLocks(t *testing.T) {
 	svc, _ := confirming(t, host, port)
 	ctx := timeout(t)
 
-	pending := svc.RunQuery(ctx, "local", "UPDATE unlocked_users SET name = 'archived'", guard.OriginHuman)
+	pending := svc.RunQuery(ctx, "local", "", "UPDATE unlocked_users SET name = 'archived'", guard.OriginHuman)
 	if pending.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q (message: %s)", pending.Status, pending.Message)
 	}
@@ -382,7 +382,7 @@ func TestIntegrationPreviewHoldsNoLocks(t *testing.T) {
 // arrive on.
 func submitAI(svc *service.AppService, ctx context.Context, sql string) <-chan service.QueryResult {
 	results := make(chan service.QueryResult, 1)
-	go func() { results <- svc.RunQuery(ctx, "local", sql, guard.OriginAI) }()
+	go func() { results <- svc.RunQuery(ctx, "local", "", sql, guard.OriginAI) }()
 	return results
 }
 

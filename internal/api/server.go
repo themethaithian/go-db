@@ -379,7 +379,11 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := s.svc.RunQuery(r.Context(), req.Profile, req.SQL, req.Origin)
+	// No database: the localhost API and the MCP proxy above it name a Profile
+	// and nothing else, so their statements run on the Profile's own
+	// connection exactly as they always have. Selecting a schema is the
+	// editor's affair.
+	result := s.svc.RunQuery(r.Context(), req.Profile, "", req.SQL, req.Origin)
 	writeJSON(w, http.StatusOK, result)
 }
 

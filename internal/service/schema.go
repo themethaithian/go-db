@@ -119,7 +119,7 @@ func (r IndexList) OK() bool { return r.Status == SchemaOK }
 // db.Conn.ReadQuery and so executes inside the read-only transaction that
 // backstops the Approval Gate.
 func (s *AppService) ListDatabases(ctx context.Context, profileName string) DatabaseList {
-	conn, err := s.registry.Conn(profileName)
+	conn, err := s.registry.Conn(ctx, profileName, "")
 	if err != nil {
 		return DatabaseList{Status: SchemaNotConnected, Message: schemaNotConnectedMessage(profileName)}
 	}
@@ -148,7 +148,7 @@ func (s *AppService) ListDatabases(ctx context.Context, profileName string) Data
 // goes through db.Conn.ReadQuery and so executes inside the read-only
 // transaction that backstops the Approval Gate.
 func (s *AppService) ListTables(ctx context.Context, profileName, database string) TableList {
-	conn, err := s.registry.Conn(profileName)
+	conn, err := s.registry.Conn(ctx, profileName, "")
 	if err != nil {
 		return TableList{Status: SchemaNotConnected, Message: schemaNotConnectedMessage(profileName)}
 	}
@@ -186,7 +186,7 @@ func (s *AppService) ListTables(ctx context.Context, profileName, database strin
 // exist, or that belongs to another schema, is not an error: it simply has no
 // columns, and ListColumns reports SchemaOK with an empty Columns.
 func (s *AppService) ListColumns(ctx context.Context, profileName, database, table string) ColumnList {
-	conn, err := s.registry.Conn(profileName)
+	conn, err := s.registry.Conn(ctx, profileName, "")
 	if err != nil {
 		return ColumnList{Status: SchemaNotConnected, Message: schemaNotConnectedMessage(profileName)}
 	}
@@ -229,7 +229,7 @@ func (s *AppService) ListColumns(ctx context.Context, profileName, database, tab
 // exist, or that belongs to another schema, is not an error: it simply has no
 // indexes, and ListIndexes reports SchemaOK with an empty Indexes.
 func (s *AppService) ListIndexes(ctx context.Context, profileName, database, table string) IndexList {
-	conn, err := s.registry.Conn(profileName)
+	conn, err := s.registry.Conn(ctx, profileName, "")
 	if err != nil {
 		return IndexList{Status: SchemaNotConnected, Message: schemaNotConnectedMessage(profileName)}
 	}

@@ -23,6 +23,17 @@ export type QueryDocument = {
   id: string;
   name: string;
   sql: string;
+  /**
+   * The database this tab's statements run in — the Connection Registry opens
+   * a connection whose default schema it is, so unqualified SQL resolves
+   * there. "" is the Profile's own connection, and the default.
+   *
+   * It belongs to the document rather than to the view because it is part of
+   * what the query means: the same text against two schemas is two different
+   * questions, and a tab that came back on the wrong one would answer the
+   * wrong question with no sign that it had.
+   */
+  database: string;
 };
 
 const STORAGE_KEY = "go-db:query-documents";
@@ -79,8 +90,12 @@ export const documents = {
  * clicking "Open in editor" twice means "show me that", not "give me two".
  * Empty documents are never deduplicated that way, or + would stop making
  * tabs the moment one blank tab existed.
+ *
+ * A new tab inherits the database the human is working in — the + button
+ * passes it — since a new line of enquiry is almost always about the same
+ * schema as the one beside it.
  */
-export function openDocument(sql: string = "", name: string = nextName()) {
+export function openDocument(sql: string = "", name: string = nextName(), database: string = "") {
   if (sql !== "") {
     const existing = workspace.docs.find((doc) => doc.sql === sql);
     if (existing !== undefined) {
@@ -88,7 +103,7 @@ export function openDocument(sql: string = "", name: string = nextName()) {
       return;
     }
   }
-  const doc: QueryDocument = { id: freshId(), name, sql };
+  const doc: QueryDocument = { id: freshId(), name, sql, database };
   workspace.docs.push(doc);
   workspace.activeId = doc.id;
   persist();
@@ -113,7 +128,7 @@ export function closeDocument(id: string) {
 
   workspace.docs.splice(at, 1);
   if (workspace.docs.length === 0) {
-    const fresh: QueryDocument = { id: freshId(), name: nextName(), sql: "" };
+    const fresh: QueryDocument = { id: freshId(), name: nextName(), sql: "", database: "" };
     workspace.docs.push(fresh);
     workspace.activeId = fresh.id;
   } else if (workspace.activeId === id) {
@@ -139,6 +154,14 @@ export function writeSql(sql: string) {
   const doc = documents.active;
   if (doc.sql === sql) return;
   doc.sql = sql;
+  persist();
+}
+
+/** Records the database the front tab's statements run in. */
+export function writeDatabase(database: string) {
+  const doc = documents.active;
+  if (doc.database === database) return;
+  doc.database = database;
   persist();
 }
 
@@ -173,7 +196,14 @@ function restore(): Workspace {
     for (const entry of stored) {
       if (!isDocument(entry) || seen.has(entry.id)) continue;
       seen.add(entry.id);
-      docs.push({ id: entry.id, name: entry.name, sql: entry.sql });
+      docs.push({
+        id: entry.id,
+        name: entry.name,
+        sql: entry.sql,
+        // Tabs written before there was a database picker have none, and the
+        // Profile's own connection is what they ran on.
+        database: typeof entry.database === "string" ? entry.database : "",
+      });
     }
     if (docs.length === 0) return blank();
 
@@ -197,7 +227,7 @@ function isDocument(value: unknown): value is QueryDocument {
 }
 
 function blank(): Workspace {
-  const doc: QueryDocument = { id: freshId(), name: "Query 1", sql: "" };
+  const doc: QueryDocument = { id: freshId(), name: "Query 1", sql: "", database: "" };
   return { docs: [doc], activeId: doc.id };
 }
 
@@ -215,7 +245,12 @@ function flush() {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        docs: workspace.docs.map((doc) => ({ id: doc.id, name: doc.name, sql: doc.sql })),
+        docs: workspace.docs.map((doc) => ({
+          id: doc.id,
+          name: doc.name,
+          sql: doc.sql,
+          database: doc.database,
+        })),
         activeId: workspace.activeId,
       }),
     );

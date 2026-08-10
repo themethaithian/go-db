@@ -118,7 +118,7 @@ func TestIntegrationRunQueryReturnsRows(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	got := svc.RunQuery(ctx, "local", "SELECT id, name, nickname, joined FROM read_users ORDER BY id", guard.OriginHuman)
+	got := svc.RunQuery(ctx, "local", "", "SELECT id, name, nickname, joined FROM read_users ORDER BY id", guard.OriginHuman)
 
 	if got.Status != service.QueryOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
@@ -280,7 +280,7 @@ func TestIntegrationRunQueryWithholdsAMutation(t *testing.T) {
 		"SELECT 1; DROP TABLE gated_users",
 	} {
 		t.Run(sql, func(t *testing.T) {
-			got := svc.RunQuery(ctx, "local", sql, guard.OriginHuman)
+			got := svc.RunQuery(ctx, "local", "", sql, guard.OriginHuman)
 
 			if got.Status != service.QueryRequiresConfirmation {
 				t.Errorf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
@@ -299,7 +299,7 @@ func TestIntegrationRunQueryWithholdsAMutation(t *testing.T) {
 	}
 
 	// Reads on the same Profile still work afterwards.
-	read := svc.RunQuery(ctx, "local", "SELECT name FROM gated_users ORDER BY id", guard.OriginHuman)
+	read := svc.RunQuery(ctx, "local", "", "SELECT name FROM gated_users ORDER BY id", guard.OriginHuman)
 	if read.Status != service.QueryOK {
 		t.Fatalf("reading after withheld mutations: status = %q (%s)", read.Status, read.Message)
 	}
@@ -326,7 +326,7 @@ func TestIntegrationRunQueryTruncatesAtTheRowCap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	got := svc.RunQuery(ctx, "local", "SELECT id FROM many_rows ORDER BY id", guard.OriginHuman)
+	got := svc.RunQuery(ctx, "local", "", "SELECT id FROM many_rows ORDER BY id", guard.OriginHuman)
 
 	if got.Status != service.QueryOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
@@ -342,7 +342,7 @@ func TestIntegrationRunQueryTruncatesAtTheRowCap(t *testing.T) {
 	}
 
 	// A result that fits is not marked truncated.
-	small := svc.RunQuery(ctx, "local", fmt.Sprintf("SELECT id FROM many_rows ORDER BY id LIMIT %d", db.MaxRows), guard.OriginHuman)
+	small := svc.RunQuery(ctx, "local", "", fmt.Sprintf("SELECT id FROM many_rows ORDER BY id LIMIT %d", db.MaxRows), guard.OriginHuman)
 	if small.Truncated {
 		t.Errorf("a result of exactly the cap (%d rows) reports itself truncated", db.MaxRows)
 	}
@@ -358,7 +358,7 @@ func TestIntegrationRunQueryReportsASQLError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	got := svc.RunQuery(ctx, "local", "SELECT nope FROM no_such_table", guard.OriginHuman)
+	got := svc.RunQuery(ctx, "local", "", "SELECT nope FROM no_such_table", guard.OriginHuman)
 
 	if got.Status != service.QueryFailed {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryFailed, got.Message)
@@ -367,4 +367,113 @@ func TestIntegrationRunQueryReportsASQLError(t *testing.T) {
 		t.Errorf("message = %q, want MySQL's own wording about the missing table", got.Message)
 	}
 	t.Logf("SQL error surfaced as: %s", got.Message)
+}
+
+// altSchema is a throwaway schema beside the Profile's own, created for the
+// test and dropped after it. It exists so a test can prove that a selected
+// database really is the connection's default schema: the only honest evidence
+// is a table that exists in one schema and not in the other.
+const altSchema = "godb_integration_alt"
+
+func seedAltSchema(t *testing.T, pool *sql.DB, statements ...string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := pool.ExecContext(ctx, "DROP DATABASE IF EXISTS "+altSchema); err != nil {
+		t.Fatalf("dropping %s: %v", altSchema, err)
+	}
+	if _, err := pool.ExecContext(ctx, "CREATE DATABASE "+altSchema); err != nil {
+		t.Fatalf("creating %s: %v", altSchema, err)
+	}
+	for _, statement := range statements {
+		if _, err := pool.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("seeding %s with %q: %v", altSchema, statement, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec("DROP DATABASE IF EXISTS " + altSchema)
+	})
+}
+
+// TestIntegrationRunQueryOnASelectedDatabase is the claim issue #32 rests on,
+// proven against MySQL rather than a fake: a selected database is the
+// connection's real default schema, so an unqualified statement resolves in it.
+// The proof is asymmetric on purpose — the same statement must succeed on the
+// schema that holds the table and fail on the one that does not.
+func TestIntegrationRunQueryOnASelectedDatabase(t *testing.T) {
+	host, port := requireMySQL(t)
+	pool := adminPool(t, host, port)
+	seedAltSchema(t, pool,
+		"CREATE TABLE "+altSchema+".alt_only (id INT PRIMARY KEY, name VARCHAR(32) NOT NULL)",
+		"INSERT INTO "+altSchema+".alt_only VALUES (1,'elsewhere')",
+	)
+	svc := connectedFacade(t, host, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const sql = "SELECT name FROM alt_only"
+
+	got := svc.RunQuery(ctx, "local", altSchema, sql, guard.OriginHuman)
+	if got.Status != service.QueryOK {
+		t.Fatalf("status on %s = %q, want %q (message: %s)", altSchema, got.Status, service.QueryOK, got.Message)
+	}
+	if len(got.Rows) != 1 || got.Rows[0][0] == nil || *got.Rows[0][0] != "elsewhere" {
+		t.Errorf("rows = %v, want the one row the other schema holds", got.Rows)
+	}
+
+	// The Profile's own connection has no such table, and must say so: if it
+	// answered, the schema was never really selected.
+	blank := svc.RunQuery(ctx, "local", "", sql, guard.OriginHuman)
+	if blank.Status != service.QueryFailed {
+		t.Fatalf("status on the Profile's own schema = %q, want %q (message: %s)",
+			blank.Status, service.QueryFailed, blank.Message)
+	}
+	if !strings.Contains(blank.Message, "alt_only") {
+		t.Errorf("message = %q, want MySQL's own words about the unknown table", blank.Message)
+	}
+
+	// DATABASE() is what the connection itself says its schema is — the thing
+	// the design promises, asked of the server directly.
+	where := svc.RunQuery(ctx, "local", altSchema, "SELECT DATABASE()", guard.OriginHuman)
+	if where.Status != service.QueryOK {
+		t.Fatalf("SELECT DATABASE() = %q (message: %s)", where.Status, where.Message)
+	}
+	if len(where.Rows) != 1 || where.Rows[0][0] == nil || *where.Rows[0][0] != altSchema {
+		t.Errorf("DATABASE() = %v, want %q", where.Rows, altSchema)
+	}
+}
+
+// A disconnected Profile takes its sibling connections with it: reconnecting
+// and asking again must open a fresh one rather than hand back a connection
+// whose Profile the human has closed.
+func TestIntegrationDisconnectClosesTheSelectedDatabasesConnection(t *testing.T) {
+	host, port := requireMySQL(t)
+	pool := adminPool(t, host, port)
+	seedAltSchema(t, pool, "CREATE TABLE "+altSchema+".alt_only (id INT PRIMARY KEY)")
+	svc := connectedFacade(t, host, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if got := svc.RunQuery(ctx, "local", altSchema, "SELECT id FROM alt_only", guard.OriginHuman); got.Status != service.QueryOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
+	}
+	if err := svc.Disconnect("local"); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+
+	got := svc.RunQuery(ctx, "local", altSchema, "SELECT id FROM alt_only", guard.OriginHuman)
+	if got.Status != service.QueryNotConnected {
+		t.Fatalf("status after Disconnect = %q, want %q (message: %s)", got.Status, service.QueryNotConnected, got.Message)
+	}
+
+	if err := svc.Connect(ctx, "local"); err != nil {
+		t.Fatalf("reconnecting: %v", err)
+	}
+	if got := svc.RunQuery(ctx, "local", altSchema, "SELECT id FROM alt_only", guard.OriginHuman); got.Status != service.QueryOK {
+		t.Errorf("status after reconnecting = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
+	}
 }

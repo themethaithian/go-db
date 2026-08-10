@@ -154,7 +154,7 @@ func (g *gate) submit(t *testing.T, ctx context.Context, sql string) <-chan serv
 	t.Helper()
 
 	results := make(chan service.QueryResult, 1)
-	go func() { results <- g.svc.RunQuery(ctx, "local", sql, guard.OriginAI) }()
+	go func() { results <- g.svc.RunQuery(ctx, "local", "", sql, guard.OriginAI) }()
 	g.timer.next(t)
 	return results
 }
@@ -276,7 +276,7 @@ func TestRunQueryPreviewsAMutationInsteadOfRunningIt(t *testing.T) {
 	g := newGate(t)
 	g.scriptPreview(t, updateOne, 3, sampleRows())
 
-	got := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	got := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
 
 	if got.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
@@ -328,7 +328,7 @@ func TestConfirmPendingExecutesOnceAndRecordsBoth(t *testing.T) {
 	g.scriptPreview(t, updateOne, 3, sampleRows())
 	g.driver.Affect("local", 2)
 
-	pending := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	pending := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
 	got := g.svc.ConfirmPending(context.Background(), pending.PendingID)
 
 	if got.Status != service.QueryExecuted {
@@ -382,7 +382,7 @@ func TestCancelPendingRunsNothing(t *testing.T) {
 	g := newGate(t)
 	g.scriptPreview(t, updateOne, 3, sampleRows())
 
-	pending := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	pending := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
 	got := g.svc.CancelPending(pending.PendingID)
 
 	if got.Status != service.QueryCancelled {
@@ -419,7 +419,7 @@ func TestConfirmPendingTwiceRunsOnce(t *testing.T) {
 	g.scriptPreview(t, updateOne, 3, sampleRows())
 	g.driver.Affect("local", 2)
 
-	pending := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	pending := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
 	if first := g.svc.ConfirmPending(context.Background(), pending.PendingID); first.Status != service.QueryExecuted {
 		t.Fatalf("first confirmation = %q (%s)", first.Status, first.Message)
 	}
@@ -471,7 +471,7 @@ func TestRunQueryWithoutAPreview(t *testing.T) {
 	g := newGate(t)
 	g.driver.Affect("local", 0)
 
-	pending := g.svc.RunQuery(context.Background(), "local", ddl, guard.OriginHuman)
+	pending := g.svc.RunQuery(context.Background(), "local", "", ddl, guard.OriginHuman)
 
 	if pending.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q, want %q (message: %s)", pending.Status, service.QueryRequiresConfirmation, pending.Message)
@@ -520,7 +520,7 @@ func TestPreviewDegradesWhenTheDatabaseRefusesIt(t *testing.T) {
 	g.driver.Affect("local", 1)
 
 	const sql = "DELETE FROM users WHERE nope = 1"
-	got := g.svc.RunQuery(context.Background(), "local", sql, guard.OriginHuman)
+	got := g.svc.RunQuery(context.Background(), "local", "", sql, guard.OriginHuman)
 
 	if got.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
@@ -548,7 +548,7 @@ func TestConfirmPendingReportsAnExecutionFailure(t *testing.T) {
 	g.scriptPreview(t, updateOne, 3, sampleRows())
 	g.driver.FailExec("local", errors.New("db: Duplicate entry '1' for key 'PRIMARY'"))
 
-	pending := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	pending := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
 	got := g.svc.ConfirmPending(context.Background(), pending.PendingID)
 
 	if got.Status != service.QueryFailed {
@@ -578,7 +578,7 @@ func TestBackstopReroutesTheHumanIntoConfirmation(t *testing.T) {
 	g.driver.RejectWrites("local")
 	g.driver.Affect("local", 1)
 
-	got := g.svc.RunQuery(context.Background(), "local", "SELECT record_visit(1)", guard.OriginHuman)
+	got := g.svc.RunQuery(context.Background(), "local", "", "SELECT record_visit(1)", guard.OriginHuman)
 
 	if got.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
@@ -814,7 +814,7 @@ func TestApprovalConsoleIgnoresInlineConfirms(t *testing.T) {
 	g.scriptPreview(t, updateOne, 3, sampleRows())
 	g.scriptPreview(t, agentSQL, 1, sampleRows())
 
-	inline := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	inline := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
 	if inline.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("the human's query = %q (%s)", inline.Status, inline.Message)
 	}
@@ -942,7 +942,7 @@ func TestAIMutationOnADisconnectedProfile(t *testing.T) {
 		t.Fatalf("Disconnect: %v", err)
 	}
 
-	got := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginAI)
+	got := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginAI)
 
 	if got.Status != service.QueryNotConnected {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryNotConnected, got.Message)
@@ -990,7 +990,7 @@ func TestReadsAreUntouchedByTheGate(t *testing.T) {
 	g := newGate(t)
 	g.driver.Answer("local", db.ResultSet{Columns: []string{"id"}, Rows: [][]*string{{str("1")}}})
 
-	got := g.svc.RunQuery(context.Background(), "local", "SELECT id FROM users", guard.OriginHuman)
+	got := g.svc.RunQuery(context.Background(), "local", "", "SELECT id FROM users", guard.OriginHuman)
 
 	if got.Status != service.QueryOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
@@ -1015,7 +1015,7 @@ func TestRunQueryMutationOnADisconnectedProfile(t *testing.T) {
 		t.Fatalf("Disconnect: %v", err)
 	}
 
-	got := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	got := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
 
 	if got.Status != service.QueryNotConnected {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryNotConnected, got.Message)
@@ -1031,7 +1031,7 @@ func TestConfirmPendingAfterTheProfileIsDisconnected(t *testing.T) {
 	g := newGate(t)
 	g.scriptPreview(t, updateOne, 3, sampleRows())
 
-	pending := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
+	pending := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
 	if err := g.svc.Disconnect("local"); err != nil {
 		t.Fatalf("Disconnect: %v", err)
 	}
@@ -1061,7 +1061,7 @@ func TestInsertValuesIsCountedWithoutAskingTheDatabase(t *testing.T) {
 	g.driver.Affect("local", 2)
 
 	const insert = "INSERT INTO users (id, name) VALUES (1,'a'), (2,'b')"
-	got := g.svc.RunQuery(context.Background(), "local", insert, guard.OriginHuman)
+	got := g.svc.RunQuery(context.Background(), "local", "", insert, guard.OriginHuman)
 
 	if got.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
@@ -1090,8 +1090,8 @@ func TestPendingConfirmationsAreIndependent(t *testing.T) {
 	g.scriptPreview(t, other, 1, sampleRows())
 	g.driver.Affect("local", 1)
 
-	first := g.svc.RunQuery(context.Background(), "local", updateOne, guard.OriginHuman)
-	second := g.svc.RunQuery(context.Background(), "local", other, guard.OriginHuman)
+	first := g.svc.RunQuery(context.Background(), "local", "", updateOne, guard.OriginHuman)
+	second := g.svc.RunQuery(context.Background(), "local", "", other, guard.OriginHuman)
 	if first.PendingID == second.PendingID {
 		t.Fatal("two confirmations share one ID")
 	}
@@ -1110,5 +1110,52 @@ func TestPendingConfirmationsAreIndependent(t *testing.T) {
 	}
 	if records := g.records(t); len(records) != 2 {
 		t.Fatalf("the audit log holds %d records, want one per decision", len(records))
+	}
+}
+
+// TestConfirmPendingExecutesOnTheDatabaseItWasClassifiedOn is the pending
+// flow's half of the editor's database picker. A withheld mutation carries the
+// schema it was submitted against, so its Impact Preview is computed there and
+// the confirmed statement executes there — on the same connection, whose
+// default schema it is. An unqualified UPDATE confirmed on some other
+// connection would silently write to another table of the same name, and there
+// is nothing in the statement itself to catch that.
+func TestConfirmPendingExecutesOnTheDatabaseItWasClassifiedOn(t *testing.T) {
+	g := newGate(t)
+	g.scriptPreview(t, updateOne, 3, sampleRows())
+	g.driver.Affect("local", 1)
+
+	pending := g.svc.RunQuery(context.Background(), "local", "reporting", updateOne, guard.OriginHuman)
+	if pending.Status != service.QueryRequiresConfirmation {
+		t.Fatalf("status = %q, want %q (message: %s)", pending.Status, service.QueryRequiresConfirmation, pending.Message)
+	}
+
+	// The preview is a pair of reads, and they belong on the same connection
+	// as the statement they describe: a count taken from another schema would
+	// be a number about the wrong rows.
+	plan, _ := guard.PlanPreview(updateOne)
+	previewed := g.driver.QueriesIn("local", "reporting")
+	if len(previewed) == 0 || previewed[0] != plan.CountSQL {
+		t.Errorf("the connection on \"reporting\" was asked %v, want the Impact Preview's count first", previewed)
+	}
+	if asked := g.driver.QueriesIn("local", "app"); len(asked) != 0 {
+		t.Errorf("the Profile's own connection was asked %v while previewing, want nothing", asked)
+	}
+
+	got := g.svc.ConfirmPending(context.Background(), pending.PendingID)
+	if got.Status != service.QueryExecuted {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryExecuted, got.Message)
+	}
+	if execs := g.driver.ExecsIn("local", "reporting"); !equalStrings(execs, []string{updateOne}) {
+		t.Errorf("the connection on \"reporting\" executed %v, want the statement as submitted, once", execs)
+	}
+	if execs := g.driver.ExecsIn("local", "app"); len(execs) != 0 {
+		t.Errorf("the Profile's own connection executed %v, want nothing", execs)
+	}
+
+	// The record has to say which schema it happened in: the statement does
+	// not, and a month later nobody can tell from the SQL alone.
+	if database := g.onlyRecord(t)["database"]; database != "reporting" {
+		t.Errorf("audit record database = %v, want \"reporting\"", database)
 	}
 }

@@ -103,7 +103,7 @@ func (s *AppService) ConnectedProfiles() []string {
 // Ping verifies the connection held for the named Profile is still usable. It
 // reports db.ErrNotConnected if the Profile is not connected.
 func (s *AppService) Ping(ctx context.Context, profileName string) error {
-	conn, err := s.registry.Conn(profileName)
+	conn, err := s.registry.Conn(ctx, profileName, "")
 	if err != nil {
 		return err
 	}

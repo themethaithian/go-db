@@ -132,7 +132,7 @@ func TestIntegrationTunnelledProfile(t *testing.T) {
 		if err := registry.Connect(ctx, "tunnelled"); err != nil {
 			t.Fatalf("Connect through the bastion: %v", err)
 		}
-		conn, err := registry.Conn("tunnelled")
+		conn, err := registry.Conn(ctx, "tunnelled", "")
 		if err != nil {
 			t.Fatalf("Conn: %v", err)
 		}

@@ -44,7 +44,7 @@ func TestRunQueryReturnsTheRows(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.RunQuery(context.Background(), "local", "SELECT id, name, deleted_at FROM users", guard.OriginHuman)
+	got := svc.RunQuery(context.Background(), "local", "", "SELECT id, name, deleted_at FROM users", guard.OriginHuman)
 
 	if got.Status != service.QueryOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
@@ -86,7 +86,7 @@ func TestRunQueryReportsTruncation(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.RunQuery(context.Background(), "local", "SELECT id FROM users", guard.OriginHuman)
+	got := svc.RunQuery(context.Background(), "local", "", "SELECT id FROM users", guard.OriginHuman)
 
 	if got.Status != service.QueryOK {
 		t.Fatalf("status = %q, want %q", got.Status, service.QueryOK)
@@ -118,7 +118,7 @@ func TestRunQueryWithholdsMutations(t *testing.T) {
 			driver := dbtest.NewFakeDriver()
 			svc := newQueryFacade(t, driver)
 
-			got := svc.RunQuery(context.Background(), "local", sql, guard.OriginHuman)
+			got := svc.RunQuery(context.Background(), "local", "", sql, guard.OriginHuman)
 
 			if got.Status != service.QueryRequiresConfirmation {
 				t.Errorf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
@@ -163,7 +163,7 @@ func TestRunQueryRerouteOnBackstop(t *testing.T) {
 	// classifier, refused by the database. The Origin decides what happens next
 	// — the AI's route is TestAIBackstoppedReadWaitsForApproval — and what this
 	// test states holds for both: the reroute is visible in the result.
-	got := svc.RunQuery(context.Background(), "local", "SELECT record_visit(1)", guard.OriginHuman)
+	got := svc.RunQuery(context.Background(), "local", "", "SELECT record_visit(1)", guard.OriginHuman)
 
 	if got.Status != service.QueryRequiresConfirmation {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryRequiresConfirmation, got.Message)
@@ -200,7 +200,7 @@ func TestRunQueryOnAProfileThatIsNotConnected(t *testing.T) {
 			svc := newConnectedFacade(t, dbtest.NewFakeKeychain(), driver)
 			mustSave(t, svc, localProfile("local"), "s3cret")
 
-			got := svc.RunQuery(context.Background(), tc.profile, "SELECT 1", guard.OriginHuman)
+			got := svc.RunQuery(context.Background(), tc.profile, "", "SELECT 1", guard.OriginHuman)
 
 			if got.Status != service.QueryNotConnected {
 				t.Errorf("status = %q, want %q (message: %s)", got.Status, service.QueryNotConnected, got.Message)
@@ -225,7 +225,7 @@ func TestRunQueryReportsADatabaseFailure(t *testing.T) {
 	driver.FailQuery("local", errors.New("db: Unknown column 'nope' in 'field list'"))
 	svc := newQueryFacade(t, driver)
 
-	got := svc.RunQuery(context.Background(), "local", "SELECT nope FROM users", guard.OriginHuman)
+	got := svc.RunQuery(context.Background(), "local", "", "SELECT nope FROM users", guard.OriginHuman)
 
 	if got.Status != service.QueryFailed {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryFailed, got.Message)
@@ -292,7 +292,7 @@ func TestRunQueryCarriesEitherOrigin(t *testing.T) {
 			driver.Answer("local", db.ResultSet{Columns: []string{"1"}, Rows: [][]*string{{str("1")}}})
 			svc := newQueryFacade(t, driver)
 
-			got := svc.RunQuery(context.Background(), "local", "SELECT 1", origin)
+			got := svc.RunQuery(context.Background(), "local", "", "SELECT 1", origin)
 
 			if got.Status != service.QueryOK {
 				t.Fatalf("status = %q, want %q", got.Status, service.QueryOK)
@@ -301,5 +301,72 @@ func TestRunQueryCarriesEitherOrigin(t *testing.T) {
 				t.Errorf("Origin = %q, want %q", got.Origin, origin)
 			}
 		})
+	}
+}
+
+// TestRunQueryRunsOnTheSelectedDatabase is the whole of the editor's database
+// picker at this seam: the statement goes down the connection for the schema it
+// names, and that connection's own default schema is what an unqualified table
+// name in it resolves against. Nothing rewrites the statement and nothing runs
+// USE — the Connection Registry hands back a different connection.
+func TestRunQueryRunsOnTheSelectedDatabase(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{Columns: []string{"id"}, Rows: [][]*string{{str("1")}}})
+	svc := newQueryFacade(t, driver)
+
+	const sql = "SELECT id FROM alt_only"
+	got := svc.RunQuery(context.Background(), "local", "reporting", sql, guard.OriginHuman)
+
+	if got.Status != service.QueryOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
+	}
+	if asked := driver.QueriesIn("local", "reporting"); !equalStrings(asked, []string{sql}) {
+		t.Errorf("the connection on \"reporting\" was asked %v, want the statement as written, once", asked)
+	}
+	// The Profile's own connection is on "app" and must not have seen it: an
+	// unqualified name there would mean another table entirely.
+	if asked := driver.QueriesIn("local", "app"); len(asked) != 0 {
+		t.Errorf("the Profile's own connection was asked %v, want nothing", asked)
+	}
+}
+
+// The blank database is the contract every existing caller relies on — the
+// localhost API, the MCP proxy, the Explorer, and the editor before anyone
+// picks a schema. It must still be the Profile's own connection and nothing
+// beside it.
+func TestRunQueryWithoutADatabaseRunsOnTheProfilesConnection(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{Columns: []string{"id"}, Rows: [][]*string{{str("1")}}})
+	svc := newQueryFacade(t, driver)
+
+	const sql = "SELECT id FROM users"
+	if got := svc.RunQuery(context.Background(), "local", "", sql, guard.OriginHuman); got.Status != service.QueryOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
+	}
+
+	if asked := driver.QueriesIn("local", "app"); !equalStrings(asked, []string{sql}) {
+		t.Errorf("the Profile's own connection was asked %v, want the statement as written, once", asked)
+	}
+	if driver.Opens() != 1 {
+		t.Errorf("%d connections opened, want 1: a blank database opens nothing new", driver.Opens())
+	}
+}
+
+// A schema the server will not give a connection on is the database refusing
+// us, not a Profile nobody connected — and the two send the human to different
+// places, so the statuses stay apart.
+func TestRunQueryReportsADatabaseItCannotConnectOn(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{})
+	svc := newQueryFacade(t, driver)
+	driver.Fail("local", errors.New("db: Unknown database 'nope'"))
+
+	got := svc.RunQuery(context.Background(), "local", "nope", "SELECT 1", guard.OriginHuman)
+
+	if got.Status != service.QueryFailed {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryFailed, got.Message)
+	}
+	if !strings.Contains(got.Message, "Unknown database") {
+		t.Errorf("message = %q, want the database's own words about the schema", got.Message)
 	}
 }

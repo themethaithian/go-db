@@ -22,9 +22,10 @@
 //
 // The empty string is a database name here, and a meaningful one: it is the
 // schema the connection itself is on (the backend compares against DATABASE()
-// for it). That is the Editor's whole world — its statements run unqualified
-// against the connection's default schema — so the Editor asks this cache for
-// "" and gets exactly the tables its statements can name.
+// for it). The Editor asks this cache for whichever database its tab has
+// selected — "" until a human picks one — and gets exactly the tables the
+// statements in that tab can name unqualified, because the connection they run
+// on has that schema as its own default.
 //
 // Indexes ride the same cache and the same rule, one step behind: nothing
 // fetches them until something asks (today, only the Structure view does —
@@ -103,6 +104,12 @@ const configured = $state<Record<string, string>>({});
 // waits on it so the auto-open cannot lose a race with a human who expands a
 // Profile the instant it connects.
 let configuredLoad: Promise<void> = Promise.resolve();
+
+// Whether the saved Profiles have ever been read. The tree re-reads them on
+// every connect, but the tree is not the only thing that needs them any more —
+// the Editor's database picker does too, and a human can spend a whole session
+// in the Editor without the tree ever syncing.
+let configuredRequested = false;
 
 // A NUL cannot appear in a Profile name or a schema name, so a key built with
 // it cannot be two different (Profile, database) pairs.
@@ -237,6 +244,33 @@ export function toggleProfile(profileName: string) {
   }
 }
 
+/**
+ * Loads a Profile's databases if nothing has yet, without expanding it — the
+ * Editor's way into the same list the tree shows. The Editor's database
+ * picker needs the names the moment a Profile is chosen, which is long before
+ * anyone expands anything in the tree.
+ */
+export function ensureDatabases(profileName: string) {
+  const node = ensureProfile(profileName);
+  if (!configuredRequested) void reloadConfigured();
+  if (node.databases === null && !node.loading) void loadDatabases(profileName);
+}
+
+/** The databases cached for a Profile, in tree order, or null before they load. */
+export function databasesOf(profileName: string): string[] | null {
+  return nodes[profileName]?.databases ?? null;
+}
+
+/**
+ * The database a Profile names in its saved settings, or "" when it names
+ * none. It is the schema the Profile's own connection is already on, which is
+ * what the Editor's picker calls the default rather than offering as one more
+ * choice beside itself.
+ */
+export function configuredDatabase(profileName: string): string {
+  return configured[profileName] ?? "";
+}
+
 /** Expands or collapses a database, loading its tables the first time. */
 export function toggleDatabase(profileName: string, database: string) {
   const node = ensureDatabase(profileName, database);
@@ -361,6 +395,7 @@ function orderDatabases(names: string[]): string[] {
 // pins so old ones can be attributed. A failure is not worth reporting: the
 // only thing lost is the auto-open, and the tree still lists every database.
 function reloadConfigured(): Promise<void> {
+  configuredRequested = true;
   configuredLoad = ListProfiles().then(
     (profiles) => {
       for (const name of Object.keys(configured)) delete configured[name];

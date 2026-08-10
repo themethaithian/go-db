@@ -107,7 +107,15 @@ func (s *AppService) SplitStatements(sql string) []guard.StatementSpan {
 	return guard.SplitStatements(sql)
 }
 
-// RunQuery submits one query on the named Profile, on behalf of origin.
+// RunQuery submits one query on the named Profile and database, on behalf of
+// origin.
+//
+// database names the schema the statement runs in, and it is a real one: the
+// Connection Registry hands back a connection whose own default schema it is,
+// so an unqualified table name resolves there and nothing has to rewrite the
+// statement. A blank database is the Profile's own connection — what the
+// localhost API, the MCP proxy and the Explorer all submit, and what the editor
+// submits until a human picks a database.
 //
 // Every query passes the Approval Gate's classifier first. Anything not
 // provably read-only is withheld and takes its Origin's route. A read executes
@@ -128,17 +136,17 @@ func (s *AppService) SplitStatements(sql string) []guard.StatementSpan {
 // design. An agent cannot be trusted to come back for a result it was told to
 // poll for, so the pause lives in the call it already made, and ctx is how the
 // caller withdraws: an MCP client that dies takes its pending mutation with it.
-func (s *AppService) RunQuery(ctx context.Context, profileName, sql string, origin guard.Origin) QueryResult {
+func (s *AppService) RunQuery(ctx context.Context, profileName, database, sql string, origin guard.Origin) QueryResult {
 	classification := guard.Classify(sql)
 	result := QueryResult{Classification: classification, Origin: origin}
 
 	if !classification.IsRead() {
-		return s.withhold(ctx, profileName, sql, result)
+		return s.withhold(ctx, profileName, database, sql, result)
 	}
 
-	conn, err := s.registry.Conn(profileName)
+	conn, err := s.registry.Conn(ctx, profileName, database)
 	if err != nil {
-		return notConnected(result, profileName)
+		return noConnection(result, profileName, err)
 	}
 
 	rows, err := conn.ReadQuery(ctx, sql)
@@ -149,7 +157,7 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, sql string, orig
 		// recognised upfront — including the confirmation and the preview,
 		// which will usually have none for a statement nobody can rewrite.
 		result.Classification = guard.Backstopped()
-		return s.withhold(ctx, profileName, sql, result)
+		return s.withhold(ctx, profileName, database, sql, result)
 
 	case err != nil:
 		result.Status = QueryFailed
@@ -172,14 +180,15 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, sql string, orig
 // connected is reported rather than queued against nothing. Both get the same
 // preview, computed the same way: what the human is deciding on does not depend
 // on who asked.
-func (s *AppService) withhold(ctx context.Context, profileName, sql string, result QueryResult) QueryResult {
-	conn, err := s.registry.Conn(profileName)
+func (s *AppService) withhold(ctx context.Context, profileName, database, sql string, result QueryResult) QueryResult {
+	conn, err := s.registry.Conn(ctx, profileName, database)
 	if err != nil {
-		return notConnected(result, profileName)
+		return noConnection(result, profileName, err)
 	}
 
 	pending := guard.Pending{
 		Profile:        profileName,
+		Database:       database,
 		SQL:            sql,
 		Origin:         result.Origin,
 		Classification: result.Classification,
@@ -201,6 +210,21 @@ func (s *AppService) withhold(ctx context.Context, profileName, sql string, resu
 func notConnected(result QueryResult, profileName string) QueryResult {
 	result.Status = QueryNotConnected
 	result.Message = fmt.Sprintf("Profile %q is not connected: connect it and run the query again.", profileName)
+	return result
+}
+
+// noConnection reports why there was nowhere to run a query. Two things can go
+// wrong now that a query names a database as well as a Profile, and they call
+// for different fixes: a Profile nobody has connected is a Connect away, while
+// a schema the server will not open a connection on — it does not exist, the
+// credentials cannot see it — is the database's own refusal and is shown in its
+// own words.
+func noConnection(result QueryResult, profileName string, err error) QueryResult {
+	if errors.Is(err, db.ErrNotConnected) {
+		return notConnected(result, profileName)
+	}
+	result.Status = QueryFailed
+	result.Message = oneLine(err)
 	return result
 }
 

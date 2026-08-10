@@ -35,6 +35,15 @@ export type SaveTarget = {
    * the Editor's statements are unqualified on purpose, and omit this.
    */
   database?: string;
+  /**
+   * The database the UPDATE is *run* in — the connection whose own default
+   * schema it is, "" for the Profile's own connection. It is a different
+   * question from `database` above, and both answers are honest: the Explorer
+   * qualifies its statement and runs it on the Profile's connection, while the
+   * Editor runs on the connection for the database its tab selected and leaves
+   * the table name bare, exactly as a typed statement does.
+   */
+  runIn?: string;
   table: string;
   /** The primary key's columns, in the index's own order. */
   keyColumns: string[];
@@ -167,7 +176,7 @@ export class RowEdits {
 
         let outcome: service.QueryResult | null;
         try {
-          outcome = await RunQuery(target.profileName, statement);
+          outcome = await RunQuery(target.profileName, target.runIn ?? "", statement);
         } catch (err) {
           this.#failure = String(err);
           break;

@@ -66,8 +66,13 @@ type Record struct {
 	DecidedAt   time.Time  `json:"decided_at"`
 	ExecutedAt  *time.Time `json:"executed_at,omitempty"`
 
-	Origin         Origin         `json:"origin"`
-	Profile        string         `json:"profile"`
+	Origin  Origin `json:"origin"`
+	Profile string `json:"profile"`
+	// Database is the schema the statement ran in, blank for the Profile's own.
+	// It is recorded because the statement usually does not say: an unqualified
+	// DELETE read back a month later means nothing without the schema it was
+	// aimed at.
+	Database       string         `json:"database,omitempty"`
 	SQL            string         `json:"sql"`
 	Classification Classification `json:"classification"`
 

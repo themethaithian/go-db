@@ -256,7 +256,9 @@
     }
     loading = true;
     try {
-      const next = await RunQuery(profileName, sql);
+      // No database: the browse statement is qualified with the schema it
+      // reads, and runs on the Profile's own connection as it always has.
+      const next = await RunQuery(profileName, "", sql);
       // This panel never confirms a write, so a withheld statement's pending
       // must not linger in the gate's queue (Inline Confirms have no expiry).
       // Cancelling records the honest outcome: the surface declined to run it.

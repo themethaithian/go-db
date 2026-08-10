@@ -148,10 +148,13 @@ func refused(outcome guard.Decision, timeout time.Duration) (QueryStatus, string
 // nowhere left to run. All three are decisions, and the reason one went nowhere
 // belongs in the record beside it.
 func (s *AppService) execute(ctx context.Context, pending guard.Pending, result QueryResult, record guard.Record) QueryResult {
-	conn, err := s.registry.Conn(pending.Profile)
+	// The connection the statement was classified and previewed on, named the
+	// same way it was then. Anything else would run an unqualified statement
+	// against a schema nobody decided about.
+	conn, err := s.registry.Conn(ctx, pending.Profile, pending.Database)
 	if err != nil {
 		record.Error = oneLine(err)
-		return s.write(notConnected(result, pending.Profile), record)
+		return s.write(noConnection(result, pending.Profile, err), record)
 	}
 
 	affected, err := conn.Exec(ctx, pending.SQL)
@@ -254,6 +257,7 @@ func decision(pending guard.Pending, outcome guard.Outcome) guard.Record {
 		DecidedAt:      outcome.DecidedAt,
 		Origin:         pending.Origin,
 		Profile:        pending.Profile,
+		Database:       pending.Database,
 		SQL:            pending.SQL,
 		Classification: pending.Classification,
 		Decision:       outcome.Decision,

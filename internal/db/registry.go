@@ -13,8 +13,17 @@ import (
 var ErrNotConnected = errors.New("db: profile is not connected")
 
 // Registry is the Connection Registry: the set of currently open connections,
-// keyed by Profile name. Several are open at once by design — the editor works
-// on one Profile while the MCP server uses another.
+// keyed by Profile name and the schema each one is open on. Several are open at
+// once by design — the editor works on one Profile while the MCP server uses
+// another.
+//
+// A Profile is connected once, on the schema its own Database names. Asking for
+// any other schema opens a *sibling* connection beside it: the same server, the
+// same credentials, the same tunnel settings, with that schema as the DSN's
+// dbname and so as the connection's own default. Nothing here runs USE. A USE
+// on a shared session would change the schema under every statement already in
+// flight on it, and the whole point of selecting a database is that unqualified
+// SQL, editability detection and generated UPDATEs resolve against it honestly.
 //
 // The Registry is the only thing that turns a Profile name into a live
 // connection. It resolves the Profile and its keychain secret itself, so a
@@ -22,19 +31,37 @@ var ErrNotConnected = errors.New("db: profile is not connected")
 // back a connection or a classified error.
 //
 // It is safe for concurrent use. Dialling happens outside the lock, so a slow
-// connect to one Profile never blocks another.
+// connect to one Profile never blocks another, and two callers racing for the
+// same sibling keep one connection between them rather than leaking the loser.
 //
 // It also owns the tunnels: a Profile with an SSH tunnel gets one opened before
 // its connection and closed after it, and nothing outside this file can hold
 // one. A tunnel that outlived its connection would be an SSH session nobody is
-// using and nobody can see.
+// using and nobody can see. A sibling gets a tunnel of its own — correctness
+// before economy, since a tunnel shared between connections would outlive
+// whichever of them closed first and there is nowhere here to notice that.
 type Registry struct {
 	driver   Driver
 	tunnels  TunnelDialer
 	profiles *ProfileStore
 
 	mu    sync.Mutex
-	conns map[string]Conn
+	conns map[connKey]Conn
+	// home is each connected Profile's own default schema, learned when it was
+	// connected. A request for exactly that schema is a request for the
+	// connection already held, not for a second one beside it on the same
+	// place — and it is read from here rather than from the ProfileStore so an
+	// edit to the Profile cannot silently re-point an open connection.
+	home map[string]string
+}
+
+// connKey identifies one open connection: the Profile it belongs to, and the
+// schema it is open on. A blank database is the Profile's own connection —
+// the key every caller used before a database could be selected, and the one
+// the localhost API and the MCP proxy still use.
+type connKey struct {
+	profile  string
+	database string
 }
 
 // NewRegistry returns an empty Registry that opens connections for the Profiles
@@ -52,7 +79,13 @@ func NewRegistryWithTunnels(driver Driver, tunnels TunnelDialer, profiles *Profi
 	if tunnels == nil {
 		tunnels = NewSSHTunnels("")
 	}
-	return &Registry{driver: driver, tunnels: tunnels, profiles: profiles, conns: make(map[string]Conn)}
+	return &Registry{
+		driver:   driver,
+		tunnels:  tunnels,
+		profiles: profiles,
+		conns:    make(map[connKey]Conn),
+		home:     make(map[string]string),
+	}
 }
 
 // Connect opens a connection for the named Profile and holds it.
@@ -66,7 +99,7 @@ func NewRegistryWithTunnels(driver Driver, tunnels TunnelDialer, profiles *Profi
 // ErrProfileNotFound, ErrAuthFailed, or ErrUnreachable where they apply.
 func (r *Registry) Connect(ctx context.Context, profileName string) error {
 	r.mu.Lock()
-	_, connected := r.conns[profileName]
+	_, connected := r.conns[connKey{profile: profileName}]
 	r.mu.Unlock()
 	if connected {
 		return nil
@@ -83,9 +116,10 @@ func (r *Registry) Connect(ctx context.Context, profileName string) error {
 	}
 
 	r.mu.Lock()
-	_, raced := r.conns[profileName]
+	_, raced := r.conns[connKey{profile: profileName}]
 	if !raced {
-		r.conns[profileName] = conn
+		r.conns[connKey{profile: profileName}] = conn
+		r.home[profileName] = profile.Database
 	}
 	r.mu.Unlock()
 
@@ -97,54 +131,102 @@ func (r *Registry) Connect(ctx context.Context, profileName string) error {
 	return nil
 }
 
-// Conn returns the open connection held for the named Profile, or
-// ErrNotConnected.
-func (r *Registry) Conn(profileName string) (Conn, error) {
+// Conn returns an open connection for the named Profile on the given database,
+// or ErrNotConnected when the Profile is not connected at all.
+//
+// A blank database is the Profile's own connection: exactly the connection
+// Connect opened, and what every caller that does not select a schema gets. So
+// is the Profile's own Database by name — a human choosing the schema their
+// Profile already names is choosing the connection they already have, and
+// opening a second one to the same place would spend a connection to change
+// nothing.
+//
+// Any other database is a sibling connection, opened here the first time it is
+// asked for and held until the Profile disconnects. Opening one can fail the
+// way any connect can — an unknown schema, a server that has gone away — and
+// that failure is returned as the driver classified it, not as ErrNotConnected:
+// the Profile is connected, this schema is simply not reachable.
+func (r *Registry) Conn(ctx context.Context, profileName, database string) (Conn, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	_, connected := r.conns[connKey{profile: profileName}]
+	if connected && database == r.home[profileName] {
+		database = ""
+	}
+	key := connKey{profile: profileName, database: database}
+	conn, held := r.conns[key]
+	r.mu.Unlock()
 
-	conn, ok := r.conns[profileName]
-	if !ok {
+	if !connected {
 		return nil, fmt.Errorf("%w: %q", ErrNotConnected, profileName)
 	}
-	return conn, nil
+	if held {
+		return conn, nil
+	}
+	return r.openSibling(ctx, key)
 }
 
 // Connected returns the names of the Profiles currently connected, ordered by
-// name.
+// name. Sibling connections are not connections to a Profile of their own and
+// do not appear: what is connected is a Profile, and that is what the UI shows.
 func (r *Registry) Connected() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	names := make([]string, 0, len(r.conns))
-	for name := range r.conns {
-		names = append(names, name)
+	for key := range r.conns {
+		if key.database == "" {
+			names = append(names, key.profile)
+		}
 	}
 	sort.Strings(names)
 	return names
 }
 
-// Disconnect closes the connection held for the named Profile and forgets it.
+// Disconnect closes the connection held for the named Profile, and every
+// sibling connection opened beside it, and forgets them all. A sibling belongs
+// to the Profile that it was opened under; leaving one behind would keep a
+// database session — and possibly an SSH tunnel — alive for a Profile the human
+// has disconnected.
+//
 // It reports ErrNotConnected if there was none; closing an already-closed
-// Profile is a caller mistake worth surfacing, not a silent no-op.
+// Profile is a caller mistake worth surfacing, not a silent no-op. It reports
+// the first close failure, having attempted all of them.
 func (r *Registry) Disconnect(profileName string) error {
 	r.mu.Lock()
-	conn, ok := r.conns[profileName]
-	delete(r.conns, profileName)
+	conn, ok := r.conns[connKey{profile: profileName}]
+	delete(r.conns, connKey{profile: profileName})
+	delete(r.home, profileName)
+
+	siblings := make([]Conn, 0, len(r.conns))
+	for key, sibling := range r.conns {
+		if key.profile == profileName {
+			siblings = append(siblings, sibling)
+			delete(r.conns, key)
+		}
+	}
 	r.mu.Unlock()
 
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrNotConnected, profileName)
 	}
-	return conn.Close()
+
+	err := conn.Close()
+	for _, sibling := range siblings {
+		if closeErr := sibling.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
-// Close closes every open connection and empties the Registry. It reports the
-// first close failure, having attempted all of them.
+// Close closes every open connection — Profiles and their siblings alike — and
+// empties the Registry. It reports the first close failure, having attempted
+// all of them.
 func (r *Registry) Close() error {
 	r.mu.Lock()
 	conns := r.conns
-	r.conns = make(map[string]Conn)
+	r.conns = make(map[connKey]Conn)
+	r.home = make(map[string]string)
 	r.mu.Unlock()
 
 	var firstErr error
@@ -154,6 +236,48 @@ func (r *Registry) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// openSibling dials one more connection for a Profile, on key's schema, and
+// holds it. It is only ever called for a Profile that was connected a moment
+// ago, and for a schema that is not the one it connected on.
+//
+// Dialling happens outside the lock, like every other connect here, so two
+// callers wanting the same schema at the same time can both dial. One of them
+// wins the map and the other closes what it opened: a losing dial left open
+// would be a connection nothing holds and nothing can close. The Profile going
+// away mid-dial ends the same way — the sibling is closed rather than filed
+// under a Profile that Disconnect has already swept.
+func (r *Registry) openSibling(ctx context.Context, key connKey) (Conn, error) {
+	profile, password, err := r.profiles.Credentials(key.profile)
+	if err != nil {
+		return nil, err
+	}
+	// The whole of a sibling: the Profile as saved, on another schema.
+	profile.Database = key.database
+
+	conn, err := r.open(ctx, profile, password)
+	if err != nil {
+		return nil, err
+	}
+
+	r.mu.Lock()
+	_, stillConnected := r.conns[connKey{profile: key.profile}]
+	existing, raced := r.conns[key]
+	if stillConnected && !raced {
+		r.conns[key] = conn
+	}
+	r.mu.Unlock()
+
+	switch {
+	case !stillConnected:
+		conn.Close() //nolint:errcheck // the Profile is gone; ErrNotConnected is the answer worth giving
+		return nil, fmt.Errorf("%w: %q", ErrNotConnected, key.profile)
+	case raced:
+		conn.Close() //nolint:errcheck // theirs is the one everyone can see; ours is the one to drop
+		return existing, nil
+	}
+	return conn, nil
 }
 
 // Test opens a throwaway connection for the named Profile, verifies it

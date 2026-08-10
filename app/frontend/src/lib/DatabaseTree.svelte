@@ -28,6 +28,7 @@
   // All schema state (what is loaded, what is expanded, what is selected)
   // lives in schema.svelte.ts and the pins in pins.svelte.ts, both at module
   // scope; this component only renders them.
+  import { untrack } from "svelte";
   import { isPinned, pinnedAmong, togglePin } from "./pins.svelte";
   import {
     databaseNode,
@@ -40,6 +41,7 @@
     toggleDatabase,
     toggleProfile,
     toggleTable,
+    type DatabaseNode,
     type TableNode,
   } from "./schema.svelte";
 
@@ -79,6 +81,163 @@
       selected.table === table.name
     );
   }
+
+  // --- Filter ----------------------------------------------------------
+  //
+  // A compact, case-insensitive substring filter over the tree, matching
+  // both table names and database names. It lives entirely in this
+  // component rather than schema.svelte.ts: it is not something anyone
+  // needs back after a reload, and it never changes what is cached, only
+  // what is drawn from it — tablesToShow and databaseVisible below are pure
+  // reads over node.tables, never a write to it.
+  //
+  // The one exception is expansion. A database with a hit has to actually
+  // open so the hit is visible, and that means writing the same
+  // node.expanded a click would — but a filter is transient, so whatever it
+  // opens has to close again the moment the box empties, back to however the
+  // human had left it. That is what expansionSnapshot is for: captured once,
+  // the instant the first character lands (never again while a query stays
+  // non-empty, or every subsequent auto-expand would overwrite the very
+  // state being preserved), and written back the instant the box empties.
+  // Capturing and restoring both read and write node.expanded without
+  // wanting to depend on it — untrack keeps that read from making this
+  // effect its own trigger.
+  let filterQuery = $state("");
+  let needle = $derived(filterQuery.trim().toLowerCase());
+  let filtering = $derived(needle !== "");
+
+  let filterInputEl: HTMLInputElement | null = $state(null);
+  let treeBodyEl: HTMLDivElement | null = $state(null);
+
+  // Databases nested under the Profile that owns them, rather than a flat
+  // map keyed by some joined string — a Profile name can contain almost
+  // anything, so a composite key would need its own escaping to stay
+  // collision-free. Nesting sidesteps the question entirely.
+  type ExpansionSnapshot = {
+    profiles: Record<string, boolean>;
+    databases: Record<string, Record<string, boolean>>;
+  };
+  let expansionSnapshot: ExpansionSnapshot | null = null;
+
+  function captureExpansion(): ExpansionSnapshot {
+    const profiles: Record<string, boolean> = {};
+    const databases: Record<string, Record<string, boolean>> = {};
+    for (const profileName of connectedProfiles) {
+      const pNode = profileNode(profileName);
+      profiles[profileName] = pNode.expanded;
+      const perDatabase: Record<string, boolean> = {};
+      for (const database of pNode.databases ?? []) {
+        perDatabase[database] = databaseNode(profileName, database).expanded;
+      }
+      databases[profileName] = perDatabase;
+    }
+    return { profiles, databases };
+  }
+
+  function restoreExpansion(snapshot: ExpansionSnapshot) {
+    for (const profileName of connectedProfiles) {
+      const pNode = profileNode(profileName);
+      if (profileName in snapshot.profiles) pNode.expanded = snapshot.profiles[profileName];
+      const perDatabase = snapshot.databases[profileName];
+      if (perDatabase === undefined) continue;
+      for (const database of pNode.databases ?? []) {
+        if (database in perDatabase) databaseNode(profileName, database).expanded = perDatabase[database];
+      }
+    }
+  }
+
+  // Whether name contains the filter, case-insensitively. Always false while
+  // the box is empty, so callers do not each need their own "is a filter
+  // even active" check.
+  function nameMatches(name: string): boolean {
+    return filtering && name.toLowerCase().includes(needle);
+  }
+
+  // The tables a database shows while filtering: every table, unfiltered, if
+  // the database's own name is the match (typing "inventory" should reveal
+  // the inventory schema whole, not hunt inside it for a table also called
+  // that) — otherwise only the tables whose own name hits.
+  function tablesToShow(database: string, tables: TableNode[]): TableNode[] {
+    if (!filtering) return tables;
+    if (nameMatches(database)) return tables;
+    return tables.filter((t) => nameMatches(t.name));
+  }
+
+  // Whether a database's row survives the filter at all. A database whose
+  // tables have never been fetched stays visible unconditionally — the only
+  // way to know it has no match would be to load it, and a filter box is not
+  // licence to fetch every schema on the server.
+  function databaseVisible(database: string, node: DatabaseNode): boolean {
+    if (!filtering) return true;
+    if (node.tables === null) return true;
+    return tablesToShow(database, node.tables).length > 0;
+  }
+
+  // Opens every already-loaded database that has a hit (and the Profile
+  // above it), so a match is on screen the instant it exists — never a
+  // database that is merely visible because it has not loaded yet, which
+  // would open onto nothing and cost a fetch this filter has no business
+  // asking for.
+  function autoExpandMatches() {
+    for (const profileName of connectedProfiles) {
+      const pNode = profileNode(profileName);
+      let anyDbVisible = false;
+      for (const database of pNode.databases ?? []) {
+        const dNode = databaseNode(profileName, database);
+        if (dNode.tables === null) {
+          anyDbVisible = true;
+          continue;
+        }
+        if (databaseVisible(database, dNode)) {
+          anyDbVisible = true;
+          dNode.expanded = true;
+        }
+      }
+      if (anyDbVisible) pNode.expanded = true;
+    }
+  }
+
+  // Whether anything at all survives the filter, across every connected
+  // Profile — the empty-state line replaces the whole tree exactly when
+  // this is false, the same all-or-nothing shape "No profile connected"
+  // already uses above it.
+  function anyMatchVisible(): boolean {
+    if (!filtering) return true;
+    for (const profileName of connectedProfiles) {
+      const pNode = profileNode(profileName);
+      for (const database of pNode.databases ?? []) {
+        if (databaseVisible(database, databaseNode(profileName, database))) return true;
+      }
+    }
+    return false;
+  }
+
+  $effect(() => {
+    if (filtering) {
+      if (expansionSnapshot === null) {
+        untrack(() => {
+          expansionSnapshot = captureExpansion();
+        });
+      }
+      autoExpandMatches();
+    } else if (expansionSnapshot !== null) {
+      const snapshot = expansionSnapshot;
+      expansionSnapshot = null;
+      untrack(() => restoreExpansion(snapshot));
+    }
+  });
+
+  function clearFilter() {
+    filterQuery = "";
+    filterInputEl?.focus();
+  }
+
+  function handleFilterKeydown(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    filterQuery = "";
+    treeBodyEl?.focus();
+  }
 </script>
 
 <!--
@@ -110,6 +269,18 @@
       <path d="M8 2.4l1.72 3.49 3.85.56-2.79 2.71.66 3.84L8 11.19l-3.44 1.81.66-3.84-2.79-2.71 3.85-.56z" />
     </svg>
   </button>
+{/snippet}
+
+<!-- A name with its filter hit picked out, if it has one. indexOf rather than
+     a RegExp built from the raw query: a table called "a.b(c)" must not turn
+     the query into a pattern, only ever a literal to search for. -->
+{#snippet highlighted(name: string)}
+  {@const at = name.toLowerCase().indexOf(needle)}
+  {#if at === -1}
+    {name}
+  {:else}
+    {name.slice(0, at)}<span class="font-semibold text-accent">{name.slice(at, at + needle.length)}</span>{name.slice(at + needle.length)}
+  {/if}
 {/snippet}
 
 <!-- One table row: the caret is optional because the PINNED group is a list of
@@ -165,7 +336,9 @@
         <rect x="2.25" y="3.25" width="11.5" height="9.5" rx="1.25" />
         <path d="M2.25 6.5h11.5M6.25 6.5v6.25" />
       </svg>
-      <span class="truncate text-base text-text">{table.name}</span>
+      <span class="truncate text-base text-text">
+        {#if filtering}{@render highlighted(table.name)}{:else}{table.name}{/if}
+      </span>
       {#if table.rowEstimate !== null}
         <span
           class="ml-auto shrink-0 text-xs tabular-nums text-text-subtle"
@@ -183,6 +356,7 @@
 {#snippet databaseRow(profileName: string, database: string)}
   {@const node = databaseNode(profileName, database)}
   {@const system = isSystemDatabase(database)}
+  {@const visibleTables = node.tables !== null ? tablesToShow(database, node.tables) : null}
   <div class="flex items-center border-l-2 border-transparent pr-2 pl-5 hover:bg-surface-raised">
     <button
       type="button"
@@ -222,7 +396,9 @@
       >
         <path d="M2.75 4.5a1.75 1.75 0 0 1 1.75-1.75h1.9l1.2 1.5h4.15a1.75 1.75 0 0 1 1.75 1.75v5.5a1.75 1.75 0 0 1-1.75 1.75h-7.5A1.75 1.75 0 0 1 2.75 11.5z" />
       </svg>
-      <span class="truncate text-base {system ? 'text-text-subtle' : 'text-text'}">{database}</span>
+      <span class="truncate text-base {system ? 'text-text-subtle' : 'text-text'}">
+        {#if filtering}{@render highlighted(database)}{:else}{database}{/if}
+      </span>
       {#if node.loading}
         <span class="ml-auto shrink-0 text-xs text-text-subtle">loading…</span>
       {:else if node.tables !== null}
@@ -236,10 +412,10 @@
   {#if node.expanded}
     {#if node.error !== null}
       <p class="py-1 pr-3 pl-12 text-sm text-danger">{node.error}</p>
-    {:else if node.tables !== null && node.tables.length === 0}
+    {:else if visibleTables !== null && visibleTables.length === 0}
       <p class="py-1 pr-3 pl-12 text-sm text-text-subtle">No tables in this schema.</p>
-    {:else if node.tables !== null}
-      {@const pinned = pinnedAmong(profileName, database, node.tables)}
+    {:else if visibleTables !== null}
+      {@const pinned = pinnedAmong(profileName, database, visibleTables)}
       {#if pinned.length > 0}
         <p
           class="flex h-6 items-center pr-3 pl-12 text-xs font-medium tracking-wide text-text-subtle uppercase"
@@ -252,7 +428,7 @@
         <div class="mx-4 my-1 border-t border-border"></div>
       {/if}
 
-      {#each node.tables as table (table.name)}
+      {#each visibleTables as table (table.name)}
         {@render tableRow(profileName, database, table, true)}
 
         {#if table.expanded}
@@ -319,7 +495,62 @@
     </button>
   </div>
 
-  <div class="min-h-0 flex-1 overflow-auto py-1">
+  <!-- The filter, right under the header where it can act on everything
+       below it. Esc clears and hands focus back to the tree; the × does the
+       same with the mouse, but leaves focus in the box for another query. -->
+  <div class="flex h-10 shrink-0 items-center border-b border-border px-3">
+    <div
+      class="flex h-7 w-full items-center gap-1.5 rounded-control border border-border bg-surface px-2 transition-colors focus-within:border-accent hover:border-border-strong"
+    >
+      <svg
+        class="h-3.5 w-3.5 shrink-0 text-text-subtle"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="7.25" cy="7.25" r="4" />
+        <path d="M13.25 13.25 10.4 10.4" />
+      </svg>
+      <input
+        bind:this={filterInputEl}
+        bind:value={filterQuery}
+        onkeydown={handleFilterKeydown}
+        class="min-w-0 flex-1 bg-transparent text-base text-text placeholder:text-text-subtle focus:outline-none"
+        placeholder="Filter tables…"
+        spellcheck="false"
+        autocapitalize="off"
+        autocomplete="off"
+        aria-label="Filter the database tree"
+      />
+      {#if filterQuery !== ""}
+        <button
+          type="button"
+          class="flex h-4 w-4 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-overlay hover:text-text"
+          onclick={clearFilter}
+          title="Clear the filter"
+          aria-label="Clear the filter"
+        >
+          <svg
+            class="h-2.5 w-2.5"
+            viewBox="0 0 12 12"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M3 3l6 6M9 3l-6 6" />
+          </svg>
+        </button>
+      {/if}
+    </div>
+  </div>
+
+  <div bind:this={treeBodyEl} tabindex="-1" class="min-h-0 flex-1 overflow-auto py-1">
     {#if connectedProfiles.length === 0}
       <p class="px-4 py-2 text-sm text-text-subtle">
         No profile connected —
@@ -331,6 +562,10 @@
           connect one
         </button>
         to browse its tables.
+      </p>
+    {:else if filtering && !anyMatchVisible()}
+      <p class="px-4 py-2 text-sm text-text-subtle">
+        No tables match "{filterQuery.trim()}"
       </p>
     {:else}
       {#each connectedProfiles as profileName (profileName)}
@@ -393,7 +628,9 @@
             <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">No databases on this server.</p>
           {:else if node.databases !== null}
             {#each node.databases as database (database)}
-              {@render databaseRow(profileName, database)}
+              {#if databaseVisible(database, databaseNode(profileName, database))}
+                {@render databaseRow(profileName, database)}
+              {/if}
             {/each}
           {/if}
         {/if}

@@ -98,22 +98,30 @@ func (a *App) ConnectedProfiles() []string {
 	return a.svc.ConnectedProfiles()
 }
 
-// ListTables returns the tables in the named Profile's schema, for the
-// DB Explorer's Database tree.
-func (a *App) ListTables(profileName string) service.TableList {
-	return a.svc.ListTables(a.ctx, profileName)
+// ListDatabases returns the schemas the named Profile's connection can see,
+// for the DB Explorer's Database tree — the level between a Profile and its
+// tables.
+func (a *App) ListDatabases(profileName string) service.DatabaseList {
+	return a.svc.ListDatabases(a.ctx, profileName)
 }
 
-// ListColumns returns the columns of table in the named Profile's schema,
-// for a table expanded in the DB Explorer's Database tree.
-func (a *App) ListColumns(profileName, table string) service.ColumnList {
-	return a.svc.ListColumns(a.ctx, profileName, table)
+// ListTables returns the tables in one database of the named Profile, for the
+// DB Explorer's Database tree. An empty database means the Profile's own
+// schema.
+func (a *App) ListTables(profileName, database string) service.TableList {
+	return a.svc.ListTables(a.ctx, profileName, database)
 }
 
-// ListIndexes returns the indexes on table in the named Profile's schema,
-// for the Explorer's Structure view of a table.
-func (a *App) ListIndexes(profileName, table string) service.IndexList {
-	return a.svc.ListIndexes(a.ctx, profileName, table)
+// ListColumns returns the columns of table in one database of the named
+// Profile, for a table expanded in the DB Explorer's Database tree.
+func (a *App) ListColumns(profileName, database, table string) service.ColumnList {
+	return a.svc.ListColumns(a.ctx, profileName, database, table)
+}
+
+// ListIndexes returns the indexes on table in one database of the named
+// Profile, for the Explorer's Structure view of a table.
+func (a *App) ListIndexes(profileName, database, table string) service.IndexList {
+	return a.svc.ListIndexes(a.ctx, profileName, database, table)
 }
 
 // Classify reports whether sql is provably read-only, without connecting to

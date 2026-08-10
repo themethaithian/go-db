@@ -46,7 +46,7 @@
   } from "./documents.svelte";
   import { deleteSaved, openSaved, saved, saveQuery } from "./saved.svelte";
   import { editorRanges, statementAt, subjectTable, type StatementRange } from "./statements";
-  import { ensureColumns, ensureIndexes, ensureTables, findTable, profileNode } from "./schema.svelte";
+  import { ensureColumns, ensureIndexes, ensureTables, findTable, tablesOf } from "./schema.svelte";
   import { mentionedTables, type CompletionSchema } from "./completion";
   import { RowEdits } from "./edits.svelte";
   import { editability, selectTarget } from "./mutate";
@@ -65,6 +65,13 @@
     onSeedConsumed: () => void;
     onGoToConnections: () => void;
   } = $props();
+
+  // The schema the Editor lives in: the connection's own default, which is the
+  // one an unqualified table name in a typed statement resolves against. The
+  // Explorer's tree can point anywhere on the server, but nothing here can —
+  // statements run as written, so the completion list and the primary key that
+  // decides editability must come from the same schema they will.
+  const DEFAULT_SCHEMA = "";
 
   // The seed is read once, and opens a tab of its own named after the table it
   // reads — deliberately not watched, and never written over an existing
@@ -116,16 +123,18 @@
   // Database tree fills, asked for without expanding anything in it.
   let editTable = $derived(result?.status === "ok" ? selectTarget(ranSql) : null);
   let editNode = $derived(
-    profileName === null || editTable === null ? null : findTable(profileName, editTable),
+    profileName === null || editTable === null
+      ? null
+      : findTable(profileName, DEFAULT_SCHEMA, editTable),
   );
   let editable = $derived(editability(editTable, shownColumns, editNode?.indexes ?? null));
   let readOnlyHint = $derived(editable.editable ? null : editable.reason);
 
   $effect(() => {
     if (profileName === null || editTable === null) return;
-    ensureTables(profileName);
+    ensureTables(profileName, DEFAULT_SCHEMA);
     const node = editNode;
-    if (node !== null) ensureIndexes(profileName, node);
+    if (node !== null) ensureIndexes(profileName, DEFAULT_SCHEMA, node);
   });
 
   // A confirm nobody will answer must not be left in the gate's queue: leaving
@@ -150,10 +159,11 @@
   let completionSchema = $derived.by((): CompletionSchema | null => {
     if (profileName === null) return null;
     const profile = profileName;
-    const tableNames = (profileNode(profile).tables ?? []).map((table) => table.name);
+    const tableNames = (tablesOf(profile, DEFAULT_SCHEMA) ?? []).map((table) => table.name);
     return {
       tables: tableNames,
-      columnsFor: (table) => findTable(profile, table)?.columns?.map((column) => column.name),
+      columnsFor: (table) =>
+        findTable(profile, DEFAULT_SCHEMA, table)?.columns?.map((column) => column.name),
     };
   });
 
@@ -161,7 +171,7 @@
   // expands it in the Database tree — autocomplete needs the table list
   // before there is a table name to complete.
   $effect(() => {
-    if (profileName !== null) ensureTables(profileName);
+    if (profileName !== null) ensureTables(profileName, DEFAULT_SCHEMA);
   });
 
   // The lazy half of column completion: for every table this buffer already
@@ -173,8 +183,8 @@
     if (profileName === null) return;
     const profile = profileName;
     for (const table of mentionedTables(sql, completionSchema?.tables ?? [])) {
-      const node = findTable(profile, table);
-      if (node !== null) ensureColumns(profile, node);
+      const node = findTable(profile, DEFAULT_SCHEMA, table);
+      if (node !== null) ensureColumns(profile, DEFAULT_SCHEMA, node);
     }
   });
 

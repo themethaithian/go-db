@@ -1,8 +1,18 @@
 <script lang="ts">
-  // The Database tool window: every connected Profile as a root, its tables
-  // beneath it, and a table's columns beneath that. Disconnected Profiles are
-  // simply absent — this window answers "what can I browse right now", and
-  // the Connections view is where a Profile becomes browsable.
+  // The Database tool window: every connected Profile as a root, the server's
+  // databases beneath it, that database's tables beneath those, and a table's
+  // columns beneath that. Disconnected Profiles are simply absent — this
+  // window answers "what can I browse right now", and the Connections view is
+  // where a Profile becomes browsable.
+  //
+  // The databases level exists because a Profile does not have to name one. A
+  // Profile with a blank Database field connects to a server, and until there
+  // was a level for them its tables were unreachable — nothing to list. A
+  // Profile that does name a database is opened on it (schema.svelte.ts), so
+  // the human who set one still finds their tables one click in.
+  //
+  // MySQL's own schemas are listed too, last and dimmed: worth reading
+  // occasionally, never what anyone connected for.
   //
   // Clicking a table's name is the point of the whole thing: it selects the
   // table, and the Explorer shows its rows beside the tree. The caret is a
@@ -10,7 +20,7 @@
   // table to read its columns must not change what is on screen to its right.
   //
   // A table can also be starred. Starred ("pinned") tables repeat in a PINNED
-  // group at the top of their Profile, which is the whole feature: during an
+  // group at the top of their database, which is the whole feature: during an
   // investigation the two or three tables that matter stop being wherever the
   // alphabet put them. The pin is a shortcut, not a move — the table keeps its
   // place in the full list, starred there too.
@@ -20,11 +30,14 @@
   // scope; this component only renders them.
   import { isPinned, pinnedAmong, togglePin } from "./pins.svelte";
   import {
+    databaseNode,
+    isSystemDatabase,
     profileNode,
     refreshAll,
     selected,
     selectTable,
     syncProfiles,
+    toggleDatabase,
     toggleProfile,
     toggleTable,
     type TableNode,
@@ -59,8 +72,12 @@
     return null;
   }
 
-  function isSelected(profileName: string, table: TableNode): boolean {
-    return selected.profile === profileName && selected.table === table.name;
+  function isSelected(profileName: string, database: string, table: TableNode): boolean {
+    return (
+      selected.profile === profileName &&
+      selected.database === database &&
+      selected.table === table.name
+    );
   }
 </script>
 
@@ -69,14 +86,14 @@
   otherwise only there while the pointer (or the keyboard focus) is on the row,
   so an unpinned tree stays a list of table names.
 -->
-{#snippet star(profileName: string, tableName: string)}
-  {@const pinned = isPinned(profileName, tableName)}
+{#snippet star(profileName: string, database: string, tableName: string)}
+  {@const pinned = isPinned(profileName, database, tableName)}
   <button
     type="button"
     class="flex h-6 w-5 shrink-0 items-center justify-center transition-colors {pinned
       ? 'text-warning hover:text-text'
       : 'text-text-subtle opacity-0 group-hover:opacity-100 hover:text-text focus-visible:opacity-100'}"
-    onclick={() => togglePin(profileName, tableName)}
+    onclick={() => togglePin(profileName, database, tableName)}
     aria-pressed={pinned}
     title={pinned ? `Unpin ${tableName}` : `Pin ${tableName} to the top`}
     aria-label={pinned ? `Unpin ${tableName}` : `Pin ${tableName} to the top`}
@@ -97,11 +114,11 @@
 
 <!-- One table row: the caret is optional because the PINNED group is a list of
      shortcuts, not a second place to expand the same table's columns. -->
-{#snippet tableRow(profileName: string, table: TableNode, caret: boolean)}
+{#snippet tableRow(profileName: string, database: string, table: TableNode, caret: boolean)}
   <div
     class="group flex items-center border-l-2 pr-2 transition-colors {caret
-      ? 'pl-5'
-      : 'pl-8'} {isSelected(profileName, table)
+      ? 'pl-9'
+      : 'pl-12'} {isSelected(profileName, database, table)
       ? 'border-accent bg-surface-overlay'
       : 'border-transparent hover:bg-surface-raised'}"
   >
@@ -109,7 +126,7 @@
       <button
         type="button"
         class="flex h-6 w-4 shrink-0 items-center justify-center text-text-subtle transition-colors hover:text-text"
-        onclick={() => toggleTable(profileName, table)}
+        onclick={() => toggleTable(profileName, database, table)}
         aria-label={table.expanded
           ? `Collapse columns of ${table.name}`
           : `Show columns of ${table.name}`}
@@ -132,7 +149,7 @@
     <button
       type="button"
       class="flex h-6 min-w-0 flex-1 items-center gap-1.5 text-left"
-      onclick={() => selectTable(profileName, table.name)}
+      onclick={() => selectTable(profileName, database, table.name)}
       title="Browse {table.name}"
     >
       <svg
@@ -158,8 +175,119 @@
         </span>
       {/if}
     </button>
-    {@render star(profileName, table.name)}
+    {@render star(profileName, database, table.name)}
   </div>
+{/snippet}
+
+<!-- One database and, when it is open, everything under it. -->
+{#snippet databaseRow(profileName: string, database: string)}
+  {@const node = databaseNode(profileName, database)}
+  {@const system = isSystemDatabase(database)}
+  <div class="flex items-center border-l-2 border-transparent pr-2 pl-5 hover:bg-surface-raised">
+    <button
+      type="button"
+      class="flex h-6 w-4 shrink-0 items-center justify-center text-text-subtle transition-colors hover:text-text"
+      onclick={() => toggleDatabase(profileName, database)}
+      aria-label={node.expanded ? `Collapse ${database}` : `Expand ${database}`}
+      aria-expanded={node.expanded}
+    >
+      <svg
+        class="h-3 w-3 transition-transform {node.expanded ? 'rotate-90' : ''}"
+        viewBox="0 0 12 12"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M4.5 2.5 8 6l-3.5 3.5" />
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="flex h-6 min-w-0 flex-1 items-center gap-1.5 text-left"
+      onclick={() => toggleDatabase(profileName, database)}
+      title={system ? `${database} — one of MySQL's own schemas` : `Show the tables in ${database}`}
+    >
+      <svg
+        class="h-3.5 w-3.5 shrink-0 {system ? 'text-text-subtle' : 'text-text-muted'}"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.3"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M2.75 4.5a1.75 1.75 0 0 1 1.75-1.75h1.9l1.2 1.5h4.15a1.75 1.75 0 0 1 1.75 1.75v5.5a1.75 1.75 0 0 1-1.75 1.75h-7.5A1.75 1.75 0 0 1 2.75 11.5z" />
+      </svg>
+      <span class="truncate text-base {system ? 'text-text-subtle' : 'text-text'}">{database}</span>
+      {#if node.loading}
+        <span class="ml-auto shrink-0 text-xs text-text-subtle">loading…</span>
+      {:else if node.tables !== null}
+        <span class="ml-auto shrink-0 text-xs tabular-nums text-text-subtle">
+          {node.tables.length}
+        </span>
+      {/if}
+    </button>
+  </div>
+
+  {#if node.expanded}
+    {#if node.error !== null}
+      <p class="py-1 pr-3 pl-12 text-sm text-danger">{node.error}</p>
+    {:else if node.tables !== null && node.tables.length === 0}
+      <p class="py-1 pr-3 pl-12 text-sm text-text-subtle">No tables in this schema.</p>
+    {:else if node.tables !== null}
+      {@const pinned = pinnedAmong(profileName, database, node.tables)}
+      {#if pinned.length > 0}
+        <p
+          class="flex h-6 items-center pr-3 pl-12 text-xs font-medium tracking-wide text-text-subtle uppercase"
+        >
+          Pinned
+        </p>
+        {#each pinned as table (table.name)}
+          {@render tableRow(profileName, database, table, false)}
+        {/each}
+        <div class="mx-4 my-1 border-t border-border"></div>
+      {/if}
+
+      {#each node.tables as table (table.name)}
+        {@render tableRow(profileName, database, table, true)}
+
+        {#if table.expanded}
+          {#if table.loading}
+            <p class="py-1 pr-3 pl-16 text-sm text-text-subtle">Loading columns…</p>
+          {:else if table.error !== null}
+            <p class="py-1 pr-3 pl-16 text-sm text-danger">{table.error}</p>
+          {:else if table.columns !== null}
+            {#each table.columns as column (column.name)}
+              {@const chip = keyChip(column.key)}
+              <div class="flex h-6 items-center gap-1.5 border-l-2 border-transparent pr-3 pl-16">
+                <span class="truncate text-base text-text-muted">{column.name}</span>
+                {#if chip !== null}
+                  <span
+                    class="shrink-0 rounded-full border px-1 text-xs leading-tight font-medium {chip.primary
+                      ? 'border-accent/40 bg-accent/10 text-accent'
+                      : 'border-border bg-surface-raised text-text-subtle'}"
+                    title={column.key}
+                  >
+                    {chip.text}
+                  </span>
+                {/if}
+                <span
+                  class="ml-auto shrink-0 truncate font-mono text-xs text-text-subtle"
+                  title={column.nullable ? `${column.data_type}, nullable` : column.data_type}
+                >
+                  {column.data_type}{column.nullable ? " ?" : ""}
+                </span>
+              </div>
+            {/each}
+          {/if}
+        {/if}
+      {/each}
+    {/if}
+  {/if}
 {/snippet}
 
 <aside
@@ -250,9 +378,9 @@
             <span class="truncate text-base font-medium text-text">{profileName}</span>
             {#if node.loading}
               <span class="ml-auto shrink-0 text-xs text-text-subtle">loading…</span>
-            {:else if node.tables !== null}
+            {:else if node.databases !== null}
               <span class="ml-auto shrink-0 text-xs tabular-nums text-text-subtle">
-                {node.tables.length}
+                {node.databases.length}
               </span>
             {/if}
           </button>
@@ -261,55 +389,11 @@
         {#if node.expanded}
           {#if node.error !== null}
             <p class="py-1 pr-3 pl-8 text-sm text-danger">{node.error}</p>
-          {:else if node.tables !== null && node.tables.length === 0}
-            <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">No tables in this schema.</p>
-          {:else if node.tables !== null}
-            {@const pinned = pinnedAmong(profileName, node.tables)}
-            {#if pinned.length > 0}
-              <p
-                class="flex h-6 items-center pr-3 pl-8 text-xs font-medium tracking-wide text-text-subtle uppercase"
-              >
-                Pinned
-              </p>
-              {#each pinned as table (table.name)}
-                {@render tableRow(profileName, table, false)}
-              {/each}
-              <div class="mx-4 my-1 border-t border-border"></div>
-            {/if}
-
-            {#each node.tables as table (table.name)}
-              {@render tableRow(profileName, table, true)}
-
-              {#if table.expanded}
-                {#if table.loading}
-                  <p class="py-1 pr-3 pl-12 text-sm text-text-subtle">Loading columns…</p>
-                {:else if table.error !== null}
-                  <p class="py-1 pr-3 pl-12 text-sm text-danger">{table.error}</p>
-                {:else if table.columns !== null}
-                  {#each table.columns as column (column.name)}
-                    {@const chip = keyChip(column.key)}
-                    <div class="flex h-6 items-center gap-1.5 border-l-2 border-transparent pr-3 pl-12">
-                      <span class="truncate text-base text-text-muted">{column.name}</span>
-                      {#if chip !== null}
-                        <span
-                          class="shrink-0 rounded-full border px-1 text-xs leading-tight font-medium {chip.primary
-                            ? 'border-accent/40 bg-accent/10 text-accent'
-                            : 'border-border bg-surface-raised text-text-subtle'}"
-                          title={column.key}
-                        >
-                          {chip.text}
-                        </span>
-                      {/if}
-                      <span
-                        class="ml-auto shrink-0 truncate font-mono text-xs text-text-subtle"
-                        title={column.nullable ? `${column.data_type}, nullable` : column.data_type}
-                      >
-                        {column.data_type}{column.nullable ? " ?" : ""}
-                      </span>
-                    </div>
-                  {/each}
-                {/if}
-              {/if}
+          {:else if node.databases !== null && node.databases.length === 0}
+            <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">No databases on this server.</p>
+          {:else if node.databases !== null}
+            {#each node.databases as database (database)}
+              {@render databaseRow(profileName, database)}
             {/each}
           {/if}
         {/if}

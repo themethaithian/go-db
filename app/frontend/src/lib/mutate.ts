@@ -39,6 +39,22 @@ export function quoteIdentifier(name: string): string {
   return "`" + name.replaceAll("`", "``") + "`";
 }
 
+/**
+ * A table name as SQL, qualified with its schema when there is one: two
+ * identifiers, each quoted on its own, never one identifier with a dot in it.
+ * `db`.`table` names a table in db; `db.table` names a table called "db.table"
+ * — the difference is the whole reason this is a function rather than string
+ * concatenation at each call site.
+ *
+ * An empty schema means the connection's own default, which is what the
+ * Editor's statements run against and what the Explorer used before there was
+ * a databases level: the name comes back bare.
+ */
+export function qualify(schema: string, table: string): string {
+  if (schema === "") return quoteIdentifier(table);
+  return `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+}
+
 // Every character that cannot travel between two quotes as itself, and what it
 // travels as. Backslash and quote are the two that matter; the control
 // characters are here so a value with a newline in it comes back out of the
@@ -72,12 +88,22 @@ export function sqlLiteral(value: CellValue): string {
  * by what it was when it was fetched, never by what the human has just typed
  * over it, even when they typed over the key itself.
  *
+ * schema qualifies the table when the rows came from a browse of a named
+ * database — the Explorer's do, since it browses `db`.`table`, and an UPDATE
+ * that dropped the schema would aim at whatever the connection's default is
+ * instead. Empty (the default, and the Editor's case) leaves the name bare.
+ *
  * Throws when the row cannot be addressed: no changes, no key, or a key column
  * that is NULL (which `=` cannot match, so a statement built on it would
  * silently update nothing). The caller shows that as a failed save rather than
  * submitting a statement that means something else.
  */
-export function buildUpdate(table: string, changes: Assignment[], keys: Assignment[]): string {
+export function buildUpdate(
+  table: string,
+  changes: Assignment[],
+  keys: Assignment[],
+  schema = "",
+): string {
   if (changes.length === 0) throw new Error("nothing to update in this row");
   if (keys.length === 0) throw new Error("no primary key to match this row on");
   for (const key of keys) {
@@ -91,7 +117,7 @@ export function buildUpdate(table: string, changes: Assignment[], keys: Assignme
   const where = keys
     .map((key) => `${quoteIdentifier(key.column)} = ${sqlLiteral(key.value)}`)
     .join(" AND ");
-  return `UPDATE ${quoteIdentifier(table)} SET ${set} WHERE ${where}`;
+  return `UPDATE ${qualify(schema, table)} SET ${set} WHERE ${where}`;
 }
 
 /**

@@ -29,6 +29,12 @@ type RowPatch = Record<string, CellValue>;
 /** Everything the save needs about the rows it is saving. */
 export type SaveTarget = {
   profileName: string;
+  /**
+   * The schema the table lives in, or "" for the connection's own default.
+   * The Explorer browses a named database and so writes a qualified UPDATE;
+   * the Editor's statements are unqualified on purpose, and omit this.
+   */
+  database?: string;
   table: string;
   /** The primary key's columns, in the index's own order. */
   keyColumns: string[];
@@ -233,7 +239,7 @@ export class RowEdits {
       column,
       value: fetched[target.columns.indexOf(column)] ?? null,
     }));
-    return buildUpdate(target.table, changes, keys);
+    return buildUpdate(target.table, changes, keys, target.database ?? "");
   }
 
   #forget(row: number) {

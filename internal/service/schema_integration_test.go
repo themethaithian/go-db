@@ -2,9 +2,11 @@ package service_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/themethaithian/go-db/internal/db"
 	"github.com/themethaithian/go-db/internal/service"
 )
 
@@ -30,7 +32,7 @@ func TestIntegrationListTablesReturnsCreatedTables(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	got := svc.ListTables(ctx, "local")
+	got := svc.ListTables(ctx, "local", "")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -85,7 +87,7 @@ func TestIntegrationListColumnsReturnsColumnMetadata(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	got := svc.ListColumns(ctx, "local", "schema_articles")
+	got := svc.ListColumns(ctx, "local", "", "schema_articles")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -134,7 +136,7 @@ func TestIntegrationListColumnsEscapesAQuotedTableName(t *testing.T) {
 
 	svc := connectedFacade(t, host, port)
 
-	got := svc.ListColumns(ctx, "local", "schema_o'brien")
+	got := svc.ListColumns(ctx, "local", "", "schema_o'brien")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -166,7 +168,7 @@ func TestIntegrationListIndexesReturnsIndexMetadata(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	got := svc.ListIndexes(ctx, "local", "schema_accounts")
+	got := svc.ListIndexes(ctx, "local", "", "schema_accounts")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -211,7 +213,7 @@ func TestIntegrationListIndexesReturnsIndexMetadata(t *testing.T) {
 func TestIntegrationListIndexesOnAProfileThatIsNotConnected(t *testing.T) {
 	svc := newMySQLFacade(t)
 
-	got := svc.ListIndexes(context.Background(), "never-connected", "users")
+	got := svc.ListIndexes(context.Background(), "never-connected", "", "users")
 
 	if got.Status != service.SchemaNotConnected {
 		t.Errorf("status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
@@ -221,9 +223,83 @@ func TestIntegrationListIndexesOnAProfileThatIsNotConnected(t *testing.T) {
 func TestIntegrationListTablesOnAProfileThatIsNotConnected(t *testing.T) {
 	svc := newMySQLFacade(t)
 
-	got := svc.ListTables(context.Background(), "never-connected")
+	got := svc.ListTables(context.Background(), "never-connected", "")
 
 	if got.Status != service.SchemaNotConnected {
 		t.Errorf("status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
+	}
+}
+
+// TestIntegrationBlankDatabaseListsTheServersSchemas is the bug this feature
+// exists for, against a real server: a Profile with no Database field has a
+// NULL DATABASE(), so the DATABASE()-pinned listing legitimately finds
+// nothing, and the only way to reach its tables is to name the schema.
+func TestIntegrationBlankDatabaseListsTheServersSchemas(t *testing.T) {
+	host, port := requireMySQL(t)
+	pool := adminPool(t, host, port)
+	seed(t, pool, "schema_unpinned",
+		"CREATE TABLE schema_unpinned (id INT PRIMARY KEY, label VARCHAR(32) NOT NULL)",
+		"INSERT INTO schema_unpinned VALUES (1, 'one')",
+	)
+	svc := newMySQLFacade(t)
+	// The Profile the user reported: host and credentials, no database.
+	mustSave(t, svc, db.Profile{
+		Name: "serverwide", Host: host, Port: port, User: mysqlRootUser,
+	}, mysqlRootPassword)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := svc.Connect(ctx, "serverwide"); err != nil {
+		t.Fatalf("Connect(serverwide): %v", err)
+	}
+
+	databases := svc.ListDatabases(ctx, "serverwide")
+	if databases.Status != service.SchemaOK {
+		t.Fatalf("ListDatabases status = %q, want %q (message: %s)",
+			databases.Status, service.SchemaOK, databases.Message)
+	}
+	for _, want := range []string{mysqlDatabase, "information_schema", "mysql"} {
+		if !slices.Contains(databases.Databases, want) {
+			t.Errorf("ListDatabases did not report %q; got %v", want, databases.Databases)
+		}
+	}
+
+	// Blank still means DATABASE(), which is NULL here — nothing matches, and
+	// that is the honest answer rather than an error.
+	unpinned := svc.ListTables(ctx, "serverwide", "")
+	if unpinned.Status != service.SchemaOK {
+		t.Fatalf("ListTables(blank) status = %q, want %q (message: %s)",
+			unpinned.Status, service.SchemaOK, unpinned.Message)
+	}
+	if len(unpinned.Tables) != 0 {
+		t.Errorf("ListTables(blank) = %+v, want nothing for a Profile with no default schema", unpinned.Tables)
+	}
+
+	// Naming the schema is what makes the tables reachable.
+	named := svc.ListTables(ctx, "serverwide", mysqlDatabase)
+	if named.Status != service.SchemaOK {
+		t.Fatalf("ListTables(%q) status = %q, want %q (message: %s)",
+			mysqlDatabase, named.Status, service.SchemaOK, named.Message)
+	}
+	found := false
+	for _, table := range named.Tables {
+		if table.Name == "schema_unpinned" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ListTables(%q) did not report schema_unpinned; got %+v", mysqlDatabase, named.Tables)
+	}
+
+	columns := svc.ListColumns(ctx, "serverwide", mysqlDatabase, "schema_unpinned")
+	if columns.Status != service.SchemaOK || len(columns.Columns) != 2 {
+		t.Errorf("ListColumns(%q, schema_unpinned) = %+v (status %q), want the table's two columns",
+			mysqlDatabase, columns.Columns, columns.Status)
+	}
+
+	indexes := svc.ListIndexes(ctx, "serverwide", mysqlDatabase, "schema_unpinned")
+	if indexes.Status != service.SchemaOK || len(indexes.Indexes) != 1 || !indexes.Indexes[0].Primary {
+		t.Errorf("ListIndexes(%q, schema_unpinned) = %+v (status %q), want just the primary key",
+			mysqlDatabase, indexes.Indexes, indexes.Status)
 	}
 }

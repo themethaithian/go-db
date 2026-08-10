@@ -29,7 +29,7 @@ func TestListTablesReturnsTablesOrderedByName(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListTables(context.Background(), "local")
+	got := svc.ListTables(context.Background(), "local", "")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -68,7 +68,7 @@ func TestListTablesOnAProfileThatIsNotConnected(t *testing.T) {
 	svc := newConnectedFacade(t, dbtest.NewFakeKeychain(), driver)
 	mustSave(t, svc, localProfile("local"), "s3cret")
 
-	got := svc.ListTables(context.Background(), "local")
+	got := svc.ListTables(context.Background(), "local", "")
 
 	if got.Status != service.SchemaNotConnected {
 		t.Errorf("status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
@@ -86,7 +86,7 @@ func TestListTablesReportsADatabaseFailure(t *testing.T) {
 	driver.FailQuery("local", errors.New("db: Unknown database 'app'"))
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListTables(context.Background(), "local")
+	got := svc.ListTables(context.Background(), "local", "")
 
 	if got.Status != service.SchemaFailed {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaFailed, got.Message)
@@ -112,7 +112,7 @@ func TestListColumnsParsesNullableAndKey(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListColumns(context.Background(), "local", "users")
+	got := svc.ListColumns(context.Background(), "local", "", "users")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -156,7 +156,7 @@ func TestListColumnsEscapesTheTableName(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListColumns(context.Background(), "local", "o'brien")
+	got := svc.ListColumns(context.Background(), "local", "", "o'brien")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -181,7 +181,7 @@ func TestListColumnsOfAnUnknownTableIsEmptyNotAnError(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListColumns(context.Background(), "local", "does_not_exist")
+	got := svc.ListColumns(context.Background(), "local", "", "does_not_exist")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -196,7 +196,7 @@ func TestListColumnsOnAProfileThatIsNotConnected(t *testing.T) {
 	svc := newConnectedFacade(t, dbtest.NewFakeKeychain(), driver)
 	mustSave(t, svc, localProfile("local"), "s3cret")
 
-	got := svc.ListColumns(context.Background(), "local", "users")
+	got := svc.ListColumns(context.Background(), "local", "", "users")
 
 	if got.Status != service.SchemaNotConnected {
 		t.Errorf("status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
@@ -214,7 +214,7 @@ func TestListColumnsReportsADatabaseFailure(t *testing.T) {
 	driver.FailQuery("local", errors.New("db: Unknown database 'app'"))
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListColumns(context.Background(), "local", "users")
+	got := svc.ListColumns(context.Background(), "local", "", "users")
 
 	if got.Status != service.SchemaFailed {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaFailed, got.Message)
@@ -240,7 +240,7 @@ func TestListIndexesGroupsACompositeIndexByColumnOrder(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListIndexes(context.Background(), "local", "users")
+	got := svc.ListIndexes(context.Background(), "local", "", "users")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -279,7 +279,7 @@ func TestListIndexesReportsAPlainSecondaryIndexAsNonUniqueNonPrimary(t *testing.
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListIndexes(context.Background(), "local", "articles")
+	got := svc.ListIndexes(context.Background(), "local", "", "articles")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -306,7 +306,7 @@ func TestListIndexesEscapesTheTableName(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListIndexes(context.Background(), "local", "o'brien")
+	got := svc.ListIndexes(context.Background(), "local", "", "o'brien")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -331,7 +331,7 @@ func TestListIndexesOfAnUnknownTableIsEmptyNotAnError(t *testing.T) {
 	})
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListIndexes(context.Background(), "local", "does_not_exist")
+	got := svc.ListIndexes(context.Background(), "local", "", "does_not_exist")
 
 	if got.Status != service.SchemaOK {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
@@ -346,7 +346,7 @@ func TestListIndexesOnAProfileThatIsNotConnected(t *testing.T) {
 	svc := newConnectedFacade(t, dbtest.NewFakeKeychain(), driver)
 	mustSave(t, svc, localProfile("local"), "s3cret")
 
-	got := svc.ListIndexes(context.Background(), "local", "users")
+	got := svc.ListIndexes(context.Background(), "local", "", "users")
 
 	if got.Status != service.SchemaNotConnected {
 		t.Errorf("status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
@@ -364,12 +364,197 @@ func TestListIndexesReportsADatabaseFailure(t *testing.T) {
 	driver.FailQuery("local", errors.New("db: Unknown database 'app'"))
 	svc := newQueryFacade(t, driver)
 
-	got := svc.ListIndexes(context.Background(), "local", "users")
+	got := svc.ListIndexes(context.Background(), "local", "", "users")
 
 	if got.Status != service.SchemaFailed {
 		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaFailed, got.Message)
 	}
 	if !strings.Contains(got.Message, "Unknown database") {
 		t.Errorf("message = %q, want the database's own wording kept", got.Message)
+	}
+}
+
+// The database-scoped half of introspection: the same three calls, told which
+// schema to answer for rather than left to the connection's own. Blank keeps
+// DATABASE() (the tests above), and a name is compared as an escaped literal —
+// so a schema called o'brien is a WHERE clause, not a syntax error.
+
+func TestListDatabasesReturnsTheServersSchemas(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"schema_name"},
+		Rows: [][]*string{
+			{str("app")},
+			{str("information_schema")},
+			{str("mysql")},
+		},
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListDatabases(context.Background(), "local")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+	// Every schema the server reports, system ones included: which of them
+	// belong at the bottom of a tree is the tree's opinion, not this package's.
+	want := []string{"app", "information_schema", "mysql"}
+	if len(got.Databases) != len(want) {
+		t.Fatalf("got %d databases, want %d: %v", len(got.Databases), len(want), got.Databases)
+	}
+	for i, name := range want {
+		if got.Databases[i] != name {
+			t.Errorf("Databases[%d] = %q, want %q", i, got.Databases[i], name)
+		}
+	}
+
+	const wantSQL = "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name"
+	queries := driver.Queries("local")
+	if len(queries) != 1 {
+		t.Fatalf("got %d queries, want 1", len(queries))
+	}
+	if queries[0] != wantSQL {
+		t.Errorf("query = %q, want exactly %q", queries[0], wantSQL)
+	}
+}
+
+func TestListDatabasesOnAProfileThatIsNotConnected(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	svc := newConnectedFacade(t, dbtest.NewFakeKeychain(), driver)
+	mustSave(t, svc, localProfile("local"), "s3cret")
+
+	got := svc.ListDatabases(context.Background(), "local")
+
+	if got.Status != service.SchemaNotConnected {
+		t.Errorf("status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
+	}
+	if !strings.Contains(got.Message, "local") {
+		t.Errorf("message %q does not name the Profile", got.Message)
+	}
+	if got.Databases != nil {
+		t.Errorf("Databases = %v, want nil when not connected", got.Databases)
+	}
+}
+
+func TestListDatabasesReportsADatabaseFailure(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.FailQuery("local", errors.New("db: command denied to user 'app'@'%'"))
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListDatabases(context.Background(), "local")
+
+	if got.Status != service.SchemaFailed {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaFailed, got.Message)
+	}
+	if !strings.Contains(got.Message, "command denied") {
+		t.Errorf("message = %q, want the database's own wording kept", got.Message)
+	}
+}
+
+// TestListTablesInANamedDatabase is the whole point of the database argument:
+// a Profile with no default schema has a NULL DATABASE(), so the only way to
+// list anything is to name the schema.
+func TestListTablesInANamedDatabase(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"table_name", "table_rows"},
+		Rows:    [][]*string{{str("orders"), str("7")}},
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListTables(context.Background(), "local", "shop")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+	if len(got.Tables) != 1 || got.Tables[0].Name != "orders" {
+		t.Errorf("Tables = %+v, want just orders", got.Tables)
+	}
+
+	const want = "SELECT table_name, table_rows FROM information_schema.tables " +
+		"WHERE table_schema = 'shop' ORDER BY table_name"
+	queries := driver.Queries("local")
+	if len(queries) != 1 {
+		t.Fatalf("got %d queries, want 1", len(queries))
+	}
+	if queries[0] != want {
+		t.Errorf("query = %q, want exactly %q", queries[0], want)
+	}
+}
+
+// TestListTablesEscapesTheDatabaseName holds the database name to the same
+// rule the table name has always been held to: it is a value, not SQL.
+func TestListTablesEscapesTheDatabaseName(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"table_name", "table_rows"},
+		Rows:    nil,
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListTables(context.Background(), "local", "o'brien")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+
+	const want = "SELECT table_name, table_rows FROM information_schema.tables " +
+		"WHERE table_schema = 'o''brien' ORDER BY table_name"
+	queries := driver.Queries("local")
+	if len(queries) != 1 {
+		t.Fatalf("got %d queries, want 1", len(queries))
+	}
+	if queries[0] != want {
+		t.Errorf("query = %q, want exactly %q", queries[0], want)
+	}
+}
+
+func TestListColumnsInANamedDatabaseEscapesBothNames(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"column_name", "column_type", "is_nullable", "column_key"},
+		Rows:    [][]*string{{str("id"), str("int"), str("NO"), str("PRI")}},
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListColumns(context.Background(), "local", "o'brien", "o'hara")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+
+	const want = "SELECT column_name, column_type, is_nullable, column_key FROM information_schema.columns " +
+		"WHERE table_schema = 'o''brien' AND table_name = 'o''hara' ORDER BY ordinal_position"
+	queries := driver.Queries("local")
+	if len(queries) != 1 {
+		t.Fatalf("got %d queries, want 1", len(queries))
+	}
+	if queries[0] != want {
+		t.Errorf("query = %q, want exactly %q", queries[0], want)
+	}
+}
+
+func TestListIndexesInANamedDatabaseEscapesBothNames(t *testing.T) {
+	driver := dbtest.NewFakeDriver()
+	driver.Answer("local", db.ResultSet{
+		Columns: []string{"index_name", "column_name", "non_unique"},
+		Rows:    [][]*string{{str("PRIMARY"), str("id"), str("0")}},
+	})
+	svc := newQueryFacade(t, driver)
+
+	got := svc.ListIndexes(context.Background(), "local", "o'brien", "o'hara")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+
+	const want = "SELECT index_name, column_name, non_unique FROM information_schema.statistics " +
+		"WHERE table_schema = 'o''brien' AND table_name = 'o''hara' ORDER BY index_name, seq_in_index"
+	queries := driver.Queries("local")
+	if len(queries) != 1 {
+		t.Fatalf("got %d queries, want 1", len(queries))
+	}
+	if queries[0] != want {
+		t.Errorf("query = %q, want exactly %q", queries[0], want)
 	}
 }

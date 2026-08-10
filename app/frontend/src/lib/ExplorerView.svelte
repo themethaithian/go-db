@@ -57,7 +57,7 @@
     type TableNode,
   } from "./schema.svelte";
   import { RowEdits } from "./edits.svelte";
-  import { editability, quoteIdentifier } from "./mutate";
+  import { editability, qualify } from "./mutate";
   import { CancelPending, RunQuery } from "../../wailsjs/go/app/App";
   import type { service } from "../../wailsjs/go/models";
 
@@ -118,7 +118,9 @@
   // and limit changes take the same numbered path, for the same reason.
   let latestRequest = 0;
 
-  let browseSql = $derived(buildSql(selected.table, browse.filter, browse.limit));
+  let browseSql = $derived(
+    buildSql(selected.database, selected.table, browse.filter, browse.limit),
+  );
 
   let rowCount = $derived(result?.status === "ok" ? (result.rows?.length ?? 0) : null);
   let shownColumns = $derived(result?.status === "ok" ? (result.columns ?? []) : []);
@@ -150,9 +152,9 @@
   // requires its Profile's table list — and so this table's node — to
   // already be loaded.
   let tableNode: TableNode | null = $derived(
-    selected.profile === null || selected.table === null
+    selected.profile === null || selected.database === null || selected.table === null
       ? null
-      : findTable(selected.profile, selected.table),
+      : findTable(selected.profile, selected.database, selected.table),
   );
   let structureLoading = $derived(
     tableNode !== null && (tableNode.loading || tableNode.indexesLoading),
@@ -168,6 +170,7 @@
   // Every table starts on Data — a table switch is a strong enough signal
   // that a mode picked for the last one should not carry over.
   $effect(() => {
+    selected.database;
     selected.table;
     mode = "data";
   });
@@ -180,11 +183,12 @@
   // between tables and back, never re-asks the database.
   $effect(() => {
     const profileName = selected.profile;
+    const database = selected.database;
     const node = tableNode;
-    if (profileName === null || node === null) return;
-    ensureIndexes(profileName, node);
+    if (profileName === null || database === null || node === null) return;
+    ensureIndexes(profileName, database, node);
     if (mode !== "structure") return;
-    ensureColumns(profileName, node);
+    ensureColumns(profileName, database, node);
   });
 
   // A confirm nobody will answer must not be left in the gate's queue: leaving
@@ -214,6 +218,7 @@
   // typed, and switching tables (which drops the condition) empties the box
   // rather than leaving a stale one behind, applied or not.
   $effect(() => {
+    selected.database;
     selected.table;
     filterInput = browse.filter;
   });
@@ -272,19 +277,29 @@
     }
   }
 
-  // The statement, and the only place it is built. Empty condition means no
-  // WHERE clause at all, rather than a WHERE that is quietly always true.
-  function buildSql(table: string | null, filter: string, limit: number): string {
-    if (table === null) return "";
+  // The statement, and the only place it is built. The table is qualified
+  // with the database it was picked from — the tree can show two schemas with
+  // a `users` in each, and an unqualified name would read whichever the
+  // connection happens to default to. Empty condition means no WHERE clause at
+  // all, rather than a WHERE that is quietly always true.
+  function buildSql(
+    database: string | null,
+    table: string | null,
+    filter: string,
+    limit: number,
+  ): string {
+    if (database === null || table === null) return "";
     const condition = filter.trim();
     const where = condition === "" ? "" : ` WHERE ${condition}`;
-    return `SELECT * FROM ${quoteIdentifier(table)}${where} LIMIT ${limit}`;
+    return `SELECT * FROM ${qualify(database, table)}${where} LIMIT ${limit}`;
   }
 
   function refresh() {
     if (selected.profile === null) return;
     if (mode === "structure") {
-      if (tableNode !== null) refreshTableStructure(selected.profile, tableNode);
+      if (tableNode !== null && selected.database !== null) {
+        refreshTableStructure(selected.profile, selected.database, tableNode);
+      }
       return;
     }
     if (browseSql === "") return;
@@ -371,9 +386,11 @@
   // throw away exactly the edits the human kept.
   async function saveEdits() {
     const profileName = selected.profile;
-    if (profileName === null || !editable.editable) return;
+    const database = selected.database;
+    if (profileName === null || database === null || !editable.editable) return;
     const saved = await edits.save({
       profileName,
+      database,
       table: editable.table,
       keyColumns: editable.keyColumns,
       columns: shownColumns,
@@ -409,8 +426,13 @@
       {#if selected.table === null || selected.profile === null}
         <span class="text-base text-text-muted">No table selected</span>
       {:else}
-        <span class="truncate font-mono text-md font-medium text-text" title={selected.table}>
-          {selected.table}
+        <!-- The name as the statement writes it: the database dimmed, the
+             table it qualifies in full — two schemas can each have a `users`. -->
+        <span
+          class="truncate font-mono text-md font-medium text-text"
+          title="{selected.database}.{selected.table}"
+        >
+          <span class="text-text-subtle">{selected.database}.</span>{selected.table}
         </span>
         <span
           class="shrink-0 rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"

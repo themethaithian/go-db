@@ -35,13 +35,16 @@ type App struct {
 	svc       *service.AppService
 	startedAt time.Time
 	readyOnce sync.Once
+	version   string
 }
 
 // New creates a new App instance backed by svc. startedAt is the process's
 // launch time (main.go's package-level time.Now()), captured here so Ready
-// can report launch-to-usable once the frontend has mounted.
-func New(svc *service.AppService, startedAt time.Time) *App {
-	return &App{svc: svc, startedAt: startedAt}
+// can report launch-to-usable once the frontend has mounted. version is
+// main.go's build-stamped version ("dev" outside a release build); it backs
+// both the Version binding and the update check's notion of "current".
+func New(svc *service.AppService, startedAt time.Time, version string) *App {
+	return &App{svc: svc, startedAt: startedAt, version: version}
 }
 
 // Startup is called by Wails when the app starts, before the frontend is
@@ -221,6 +224,14 @@ func (a *App) ExecutablePath() (string, error) {
 		return "", fmt.Errorf("app: resolving executable symlinks: %w", err)
 	}
 	return resolved, nil
+}
+
+// Version returns the running build's version — the git tag it was built
+// from, or "dev" for a local/source build. The status bar's version chip
+// reads this; CheckForUpdate uses the same value as its "current" side of
+// the comparison.
+func (a *App) Version() string {
+	return a.version
 }
 
 // Ready is called once by the frontend on its first mount. It logs

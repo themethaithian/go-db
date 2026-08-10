@@ -25,6 +25,13 @@ import (
 // subcommand, which never constructs an App.
 var processStart = time.Now()
 
+// version is stamped at build time by the release workflow via
+// `-ldflags "-X main.version=vX.Y.Z"`, taken from the git tag. Local/dev
+// builds never pass that flag, so they report "dev" — the App's update
+// check treats "dev" as never outdated rather than nagging a developer
+// running off source.
+var version = "dev"
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		runMCP(os.Args[2:])
@@ -46,7 +53,7 @@ func main() {
 		guard.NewJSONLAuditLog(configDir),
 		time.Now,
 	)
-	shell := app.New(svc, processStart)
+	shell := app.New(svc, processStart, version)
 
 	// The local API is a second, thin adapter over the same facade: a
 	// loopback-only, token-gated pipe the MCP proxy talks to. It shares the

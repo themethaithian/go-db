@@ -9,8 +9,16 @@
   import ExplorerView from "./lib/ExplorerView.svelte";
   import EditorView from "./lib/EditorView.svelte";
   import ApprovalConsole from "./lib/ApprovalConsole.svelte";
-  import { ConnectedProfiles, ListPendingApprovals, MemoryUsageMB, Ready } from "../wailsjs/go/app/App";
-  import type { guard } from "../wailsjs/go/models";
+  import {
+    CheckForUpdate,
+    ConnectedProfiles,
+    ListPendingApprovals,
+    MemoryUsageMB,
+    OpenURL,
+    Ready,
+    Version,
+  } from "../wailsjs/go/app/App";
+  import type { app, guard } from "../wailsjs/go/models";
 
   type View = "connections" | "explorer" | "editor" | "approvals";
 
@@ -28,10 +36,18 @@
   // crosses this line — the budget keeping itself honest.
   const MEMORY_BUDGET_MB = 150;
 
+  // How often the update check (issue #33) re-runs while the app stays
+  // open: once on mount, then daily. A courtesy check, not a nag — see
+  // app/update.go's CheckForUpdate doc comment for why it never surfaces
+  // an error.
+  const UPDATE_CHECK_MS = 24 * 60 * 60 * 1000;
+
   let view = $state<View>("connections");
   let connectedProfiles = $state<string[]>([]);
   let pendingApprovals = $state<guard.Waiting[]>([]);
   let memoryMB = $state<number | null>(null);
+  let version = $state("");
+  let updateInfo = $state<app.UpdateInfo | null>(null);
 
   // A statement in transit from the Explorer to the Editor — the Explorer's
   // "Open in editor" is the one way a view hands work to another, so the
@@ -57,6 +73,17 @@
     memoryMB = await MemoryUsageMB();
   }
 
+  // Fetches the update state — never awaited by callers, and CheckForUpdate
+  // itself never throws (network failures come back as Outdated:false), so
+  // this can't block or fail startup.
+  async function checkForUpdate() {
+    updateInfo = await CheckForUpdate();
+  }
+
+  function openReleasePage() {
+    if (updateInfo?.url) OpenURL(updateInfo.url);
+  }
+
   onMount(() => {
     // Tells the shell the frontend has mounted, so it can log
     // launch-to-usable once to stderr (CLAUDE.md budget: < 2 s).
@@ -64,11 +91,15 @@
     refreshConnections();
     refreshApprovals();
     refreshMemory();
+    Version().then((v) => (version = v));
+    checkForUpdate();
     const approvalsInterval = setInterval(refreshApprovals, APPROVALS_POLL_MS);
     const memoryInterval = setInterval(refreshMemory, MEMORY_POLL_MS);
+    const updateInterval = setInterval(checkForUpdate, UPDATE_CHECK_MS);
     return () => {
       clearInterval(approvalsInterval);
       clearInterval(memoryInterval);
+      clearInterval(updateInterval);
     };
   });
 
@@ -171,13 +202,32 @@
         </span>
       {/if}
     </span>
-    <span
-      class="tabular-nums {memoryMB !== null && memoryMB > MEMORY_BUDGET_MB ? 'text-warning' : ''}"
-      title={memoryMB !== null && memoryMB > MEMORY_BUDGET_MB
-        ? `over the ${MEMORY_BUDGET_MB} MB idle budget`
-        : `idle budget ${MEMORY_BUDGET_MB} MB`}
-    >
-      {memoryMB === null ? "— MB" : `${Math.round(memoryMB)} MB`}
+    <span class="flex items-center gap-3">
+      <!-- Version chip (issue #33): quiet by default, accent when a newer
+           release is out. Never blocks or errors — CheckForUpdate always
+           resolves, offline or not. -->
+      {#if updateInfo?.outdated}
+        <button
+          type="button"
+          class="rounded-control bg-accent px-2 py-0.5 font-medium text-white transition-colors hover:bg-accent-hover"
+          title={`go-db ${updateInfo.latest} is available (running ${updateInfo.current}) — click to open the release page`}
+          onclick={openReleasePage}
+        >
+          {updateInfo.latest} available
+        </button>
+      {:else}
+        <span class="text-text-subtle" title="go-db version">
+          {version || "…"}
+        </span>
+      {/if}
+      <span
+        class="tabular-nums {memoryMB !== null && memoryMB > MEMORY_BUDGET_MB ? 'text-warning' : ''}"
+        title={memoryMB !== null && memoryMB > MEMORY_BUDGET_MB
+          ? `over the ${MEMORY_BUDGET_MB} MB idle budget`
+          : `idle budget ${MEMORY_BUDGET_MB} MB`}
+      >
+        {memoryMB === null ? "— MB" : `${Math.round(memoryMB)} MB`}
+      </span>
     </span>
   </footer>
 </div>

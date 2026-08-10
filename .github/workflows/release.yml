@@ -38,8 +38,21 @@ jobs:
         # Pinned to the same version as the wailsapp/wails/v2 module in go.mod.
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
 
+      - name: Determine version
+        # Stamped into the binary below. A tag push names the version after
+        # the tag itself; a manual dispatch run (no tag) builds "dev" — the
+        # same value a local `wails build` reports, so a dry-run artifact
+        # never looks like a real release.
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build universal .app
-        run: wails build -platform darwin/universal
+        run: wails build -platform darwin/universal -ldflags "-X main.version=${{ steps.version.outputs.value }}"
 
       - name: Verify universal binary
         run: |
@@ -67,3 +80,4 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           files: go-db-macos-universal.zip
+          generate_release_notes: true

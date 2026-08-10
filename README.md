@@ -14,6 +14,14 @@ Existing database clients are heavy, ugly, and risky to trust with AI agents.
 
 ## Install
 
+One-liner (downloads the latest release, installs to /Applications, clears Gatekeeper's quarantine):
+
+```
+curl -L https://github.com/themethaithian/go-db/releases/latest/download/go-db-macos-universal.zip | tar -xf - -C /Applications && xattr -d com.apple.quarantine /Applications/go-db.app
+```
+
+Or step by step:
+
 1. Download the latest `go-db-macos-universal.zip` from [GitHub Releases](https://github.com/themethaithian/go-db/releases).
 2. Unzip it, then drag `go-db.app` to `/Applications`.
 3. First launch: the build isn't signed/notarized yet (no Apple Developer account in this round), so macOS Gatekeeper will block a plain double-click. Either right-click `go-db.app` → **Open** and confirm, or clear the quarantine flag yourself:

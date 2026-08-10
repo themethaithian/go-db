@@ -107,10 +107,27 @@ export function schemaCompletion(getSchema: () => CompletionSchema | null): Comp
 }
 
 /**
- * Keyword completion for the MySQL dialect, upper-cased to match Format's
- * output — SELECT, FROM, WHERE, ORDER BY, LIMIT, INSERT, JOIN and the rest
- * of @codemirror/lang-sql's built-in MySQL word list. Static: keywords do
- * not change under a running editor, so there is nothing here for a getter
- * to refresh.
+ * Keyword completion for the MySQL dialect — SELECT, FROM, WHERE, ORDER BY,
+ * LIMIT, INSERT, JOIN and the rest of @codemirror/lang-sql's built-in MySQL
+ * word list. Casing follows the human's lead rather than a house style: a
+ * prefix typed in all caps completes to SELECT, anything else to select.
  */
-export const keywordCompletion: CompletionSource = keywordCompletionSource(MySQL, true);
+const lowerKeywords = keywordCompletionSource(MySQL, false);
+
+// The lowercase source hands back the same static options array on every
+// call, so the uppercase twin is derived once and reused.
+let upperOptions: Completion[] | null = null;
+
+export const keywordCompletion: CompletionSource = (context) => {
+  const result = lowerKeywords(context);
+  // The keyword source is synchronous in practice; the Promise arm exists
+  // only to satisfy CompletionSource's signature.
+  if (result === null || result instanceof Promise) return result;
+  const typed = context.state.sliceDoc(result.from, context.pos);
+  if (typed === "" || typed !== typed.toUpperCase()) return result;
+  upperOptions ??= result.options.map((option) => ({
+    ...option,
+    label: option.label.toUpperCase(),
+  }));
+  return { ...result, options: upperOptions };
+};

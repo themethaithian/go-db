@@ -396,9 +396,10 @@
   let canFormat = $derived(sql.trim() !== "");
 
   // Pretty-prints the whole document of the active tab, MySQL-flavoured,
-  // uppercase keywords. sql-formatter is loaded on first use rather than at
-  // startup — it is the one dependency this feature needed, and nothing else
-  // in the app wants it sitting in the launch bundle.
+  // keyword casing left exactly as typed — Format owns layout, not spelling.
+  // sql-formatter is loaded on first use rather than at startup — it is the
+  // one dependency this feature needed, and nothing else in the app wants it
+  // sitting in the launch bundle.
   //
   // The result goes back through writeSql, the same path typing takes, so
   // it reaches SqlEditor as an ordinary `value` change: the editor's own
@@ -412,7 +413,7 @@
     const { format } = await import("sql-formatter");
     let formatted: string;
     try {
-      formatted = format(sql, { language: "mysql", keywordCase: "upper" });
+      formatted = format(sql, { language: "mysql", keywordCase: "preserve" });
     } catch {
       // A buffer sql-formatter cannot parse (mid-edit, a dialect quirk it
       // does not know) is left exactly as typed rather than replaced with

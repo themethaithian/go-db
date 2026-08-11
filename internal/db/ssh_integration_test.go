@@ -137,9 +137,13 @@ func TestIntegrationTunnelledProfile(t *testing.T) {
 			t.Fatalf("Conn: %v", err)
 		}
 
-		result, err := conn.ReadQuery(ctx, "SELECT DATABASE() AS db")
+		answer, err := conn.ReadQuery(ctx, "SELECT DATABASE() AS db")
 		if err != nil {
 			t.Fatalf("ReadQuery through the bastion: %v", err)
+		}
+		result, ok := answer.Table()
+		if !ok {
+			t.Fatalf("ReadQuery answered kind %q, want the Table arm: SQL answers in rows", answer.Kind())
 		}
 		if len(result.Rows) != 1 || result.Rows[0][0] == nil || *result.Rows[0][0] != bastionDatabase {
 			t.Fatalf("SELECT DATABASE() = %+v, want %q", result.Rows, bastionDatabase)

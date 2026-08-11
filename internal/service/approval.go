@@ -203,7 +203,7 @@ func (s *AppService) previewImpact(ctx context.Context, conn db.Conn, sql string
 
 	count := plan.StaticCount
 	if plan.CountSQL != "" {
-		rows, err := conn.ReadQuery(ctx, plan.CountSQL)
+		rows, err := readTable(ctx, conn, plan.CountSQL)
 		if err != nil {
 			return guard.NoPreview("the affected rows could not be counted: " + oneLine(err))
 		}
@@ -217,7 +217,7 @@ func (s *AppService) previewImpact(ctx context.Context, conn db.Conn, sql string
 	if plan.SampleSQL != "" {
 		// A sample that will not run costs the human nothing they need: the
 		// count, which is the number they are deciding on, is already in hand.
-		if rows, err := conn.ReadQuery(ctx, plan.SampleSQL); err == nil {
+		if rows, err := readTable(ctx, conn, plan.SampleSQL); err == nil {
 			preview.Columns, preview.Rows = rows.Columns, rows.Rows
 		}
 	}

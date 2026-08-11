@@ -149,7 +149,7 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, database, sql st
 		return noConnection(result, profileName, err)
 	}
 
-	rows, err := conn.ReadQuery(ctx, sql)
+	rows, err := readTable(ctx, conn, sql)
 	switch {
 	case errors.Is(err, db.ErrWriteAttempt):
 		// The classifier was wrong and the database caught it. The query is a
@@ -245,6 +245,51 @@ func confirmationMessage(classification guard.Classification, preview guard.Prev
 	}
 	return fmt.Sprintf("This query was not run: %s. There is no Impact Preview: %s. Confirm to run it.",
 		classification.Reason, preview.Reason)
+}
+
+// readTable runs one read on conn and unwraps the Table arm of what comes back.
+// It is the one place this package turns a db.Result into rows, and every read
+// the facade performs — the editor's query, the Database tree's introspection,
+// an Impact Preview's count — goes through it.
+//
+// The unwrapping can fail, and it must fail loudly. Every Engine with an adapter
+// today answers with the Table arm, so a Result of any other kind means an
+// adapter for an Engine whose answers are documents or one typed value has been
+// wired to a facade that only knows how to render a table (ADR-0006). There is
+// nothing sensible to show for it: the Table arm's zero value is an empty
+// columns-and-rows answer, and an empty answer is a real result a database can
+// return — reporting one here would be inventing a reply the database never
+// gave. So the shape mismatch is returned as an error, which every caller
+// already knows how to report, and it names the kind it was given so the fix is
+// obvious. When those Engines arrive, this is the seam their views hang off,
+// and the branch is already here.
+func readTable(ctx context.Context, conn db.Conn, sql string) (db.ResultSet, error) {
+	result, err := conn.ReadQuery(ctx, sql)
+	if err != nil {
+		return db.ResultSet{}, err
+	}
+	rows, ok := result.Table()
+	if !ok {
+		return db.ResultSet{}, fmt.Errorf(
+			"this answer came back as %s, which is not a table and cannot be shown as one", resultShape(result))
+	}
+	return rows, nil
+}
+
+// resultShape names a Result's kind for the line a human reads. The kinds are
+// ADR-0006's vocabulary; an unset one is a Result no adapter filled in, which is
+// a bug in an adapter rather than a shape.
+func resultShape(result db.Result) string {
+	switch kind := result.Kind(); kind {
+	case db.ResultDocuments:
+		return "a list of documents"
+	case db.ResultValue:
+		return "a single value"
+	case "":
+		return "no result at all"
+	default:
+		return fmt.Sprintf("%q", kind)
+	}
 }
 
 // summarise is the line shown beside a result table.

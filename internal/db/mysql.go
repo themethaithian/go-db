@@ -116,18 +116,20 @@ func (c *mysqlConn) Ping(ctx context.Context) error {
 	return nil
 }
 
-// ReadQuery runs sql inside a READ ONLY transaction and returns its rows.
+// ReadQuery runs sql inside a READ ONLY transaction and returns its rows as the
+// Result union's Table arm — SQL's answers are columns and rows, and that is
+// the whole of what this Engine ever tags them (ADR-0006).
 //
 // The transaction is the point of the method, not an implementation detail: it
 // is what lets the app run a statement it only believes is a read. MySQL
 // refuses any write inside one with error 1792, which becomes ErrWriteAttempt
 // so the Approval Gate can take the query back.
-func (c *mysqlConn) ReadQuery(ctx context.Context, sql string) (ResultSet, error) {
+func (c *mysqlConn) ReadQuery(ctx context.Context, sql string) (Result, error) {
 	// A read-only transaction is a property of one session, so the statement
 	// and its transaction must share a connection; BeginTx pins one for us.
 	tx, err := c.pool.BeginTx(ctx, &txReadOnly)
 	if err != nil {
-		return ResultSet{}, readError(err)
+		return Result{}, readError(err)
 	}
 	// Nothing in here commits: a transaction that only read has nothing to
 	// commit, and rolling back is the one ending that is correct whether the
@@ -136,15 +138,15 @@ func (c *mysqlConn) ReadQuery(ctx context.Context, sql string) (ResultSet, error
 
 	rows, err := tx.QueryContext(ctx, sql)
 	if err != nil {
-		return ResultSet{}, readError(err)
+		return Result{}, readError(err)
 	}
 	defer rows.Close()
 
 	result, err := collect(rows)
 	if err != nil {
-		return ResultSet{}, readError(err)
+		return Result{}, readError(err)
 	}
-	return result, nil
+	return TableResult(result), nil
 }
 
 // Exec runs an approved mutation directly on the pool — no transaction, so

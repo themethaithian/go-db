@@ -199,7 +199,12 @@ func (d *FakeDriver) QueriesIn(profileName, database string) []string {
 }
 
 // readQuery answers one read for at's connection, recording it first.
-func (d *FakeDriver) readQuery(at target, sql string) (db.ResultSet, error) {
+//
+// Scripting stays in ResultSet terms and the tagging happens here, exactly as
+// the MySQL adapter tags its own: this fake stands in for a SQL server, whose
+// answers are always the Result union's Table arm. An Engine that answers in
+// another shape will need its own scripting verbs, not a wider Answer.
+func (d *FakeDriver) readQuery(at target, sql string) (db.Result, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -207,15 +212,15 @@ func (d *FakeDriver) readQuery(at target, sql string) (db.ResultSet, error) {
 	d.queriesIn[at] = append(d.queriesIn[at], sql)
 
 	if err, refused := d.refusals[at.profile]; refused {
-		return db.ResultSet{}, err
+		return db.Result{}, err
 	}
 	if answer, scripted := d.byQuery[at.profile+"\x00"+sql]; scripted {
-		return answer, nil
+		return db.TableResult(answer), nil
 	}
 	if answer, scripted := d.answers[at.profile]; scripted {
-		return answer, nil
+		return db.TableResult(answer), nil
 	}
-	return db.ResultSet{}, fmt.Errorf("dbtest: profile %q has no scripted result for %q", at.profile, sql)
+	return db.Result{}, fmt.Errorf("dbtest: profile %q has no scripted result for %q", at.profile, sql)
 }
 
 // Accept makes profileName reachable, answering to exactly this password. A
@@ -350,16 +355,16 @@ func (c *fakeConn) Ping(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (c *fakeConn) ReadQuery(ctx context.Context, sql string) (db.ResultSet, error) {
+func (c *fakeConn) ReadQuery(ctx context.Context, sql string) (db.Result, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return db.ResultSet{}, errors.New("dbtest: read on a closed connection")
+		return db.Result{}, errors.New("dbtest: read on a closed connection")
 	}
 	c.mu.Unlock()
 
 	if err := ctx.Err(); err != nil {
-		return db.ResultSet{}, err
+		return db.Result{}, err
 	}
 	return c.driver.readQuery(c.at, sql)
 }

@@ -189,8 +189,10 @@ func TestIntegrationReadOnlyTransactionRejectsAWrite(t *testing.T) {
 			if !errors.Is(err, db.ErrWriteAttempt) {
 				t.Fatalf("ReadQuery(%q) error = %v, want it to wrap db.ErrWriteAttempt", write, err)
 			}
-			if got.Columns != nil || got.Rows != nil {
-				t.Errorf("a refused write returned data: %+v", got)
+			// A refused write carries no arm at all, so nothing downstream can
+			// mistake it for an empty answer the database actually gave.
+			if rows, ok := got.Table(); ok {
+				t.Errorf("a refused write returned a table: %+v", rows)
 			}
 		})
 	}
@@ -202,9 +204,15 @@ func TestIntegrationReadOnlyTransactionRejectsAWrite(t *testing.T) {
 	// The refused transaction must have been rolled back and released, or the
 	// connection would be unusable — and the Registry hands the same one out
 	// for every later query.
-	after, err := conn.ReadQuery(ctx, "SELECT name FROM backstop_users ORDER BY id")
+	answer, err := conn.ReadQuery(ctx, "SELECT name FROM backstop_users ORDER BY id")
 	if err != nil {
 		t.Fatalf("reading after a refused write: %v; the transaction was not cleaned up", err)
+	}
+	// The MySQL adapter tags every answer it does give as the Table arm: SQL
+	// answers in columns and rows, and that is the whole of its vocabulary.
+	after, ok := answer.Table()
+	if !ok {
+		t.Fatalf("ReadQuery answered kind %q, want the Table arm", answer.Kind())
 	}
 	if len(after.Rows) != 2 {
 		t.Errorf("got %d rows after a refused write, want 2", len(after.Rows))

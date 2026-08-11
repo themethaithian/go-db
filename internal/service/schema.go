@@ -124,7 +124,7 @@ func (s *AppService) ListDatabases(ctx context.Context, profileName string) Data
 		return DatabaseList{Status: SchemaNotConnected, Message: schemaNotConnectedMessage(profileName)}
 	}
 
-	rows, err := conn.ReadQuery(ctx,
+	rows, err := readTable(ctx, conn,
 		"SELECT schema_name FROM information_schema.schemata ORDER BY schema_name")
 	if err != nil {
 		return DatabaseList{Status: SchemaFailed, Message: oneLine(err)}
@@ -158,7 +158,7 @@ func (s *AppService) ListTables(ctx context.Context, profileName, database strin
 			"WHERE table_schema = %s ORDER BY table_name",
 		schemaPredicate(database),
 	)
-	rows, err := conn.ReadQuery(ctx, sql)
+	rows, err := readTable(ctx, conn, sql)
 	if err != nil {
 		return TableList{Status: SchemaFailed, Message: oneLine(err)}
 	}
@@ -196,7 +196,7 @@ func (s *AppService) ListColumns(ctx context.Context, profileName, database, tab
 			"WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position",
 		schemaPredicate(database), sqlStringLiteral(table),
 	)
-	rows, err := conn.ReadQuery(ctx, sql)
+	rows, err := readTable(ctx, conn, sql)
 	if err != nil {
 		return ColumnList{Status: SchemaFailed, Message: oneLine(err)}
 	}
@@ -239,7 +239,7 @@ func (s *AppService) ListIndexes(ctx context.Context, profileName, database, tab
 			"WHERE table_schema = %s AND table_name = %s ORDER BY index_name, seq_in_index",
 		schemaPredicate(database), sqlStringLiteral(table),
 	)
-	rows, err := conn.ReadQuery(ctx, sql)
+	rows, err := readTable(ctx, conn, sql)
 	if err != nil {
 		return IndexList{Status: SchemaFailed, Message: oneLine(err)}
 	}

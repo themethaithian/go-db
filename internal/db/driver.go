@@ -88,7 +88,13 @@ type Conn interface {
 	Ping(ctx context.Context) error
 
 	// ReadQuery runs one statement inside a read-only transaction and returns
-	// its rows, at most MaxRows of them.
+	// its answer, tagged with the shape that answer came back in — for a table
+	// of rows, at most MaxRows of them.
+	//
+	// The Result is a union rather than a ResultSet because the shape of an
+	// answer belongs to the Engine (ADR-0006): SQL answers in columns and rows,
+	// MongoDB in documents, Redis in one typed value. Every adapter in this
+	// package fills exactly one arm, and callers must ask which — see Result.
 	//
 	// The transaction is the second layer of the Approval Gate, and the reason
 	// this method is safe to call with a statement the classifier only
@@ -105,7 +111,7 @@ type Conn interface {
 	//
 	// Implementations must not interpolate anything into sql; it is executed
 	// exactly as given.
-	ReadQuery(ctx context.Context, sql string) (ResultSet, error)
+	ReadQuery(ctx context.Context, sql string) (Result, error)
 
 	// Exec runs one approved statement and reports how many rows it changed.
 	//

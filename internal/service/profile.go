@@ -2,9 +2,17 @@ package service
 
 import "github.com/themethaithian/go-db/internal/db"
 
-// ListProfiles returns every saved Profile, ordered by name.
+// ListProfiles returns every saved Profile, in saved order.
 func (s *AppService) ListProfiles() ([]db.Profile, error) {
 	return s.profiles.List()
+}
+
+// ReorderProfiles rewrites the saved Profile order to match names exactly.
+// names must be a permutation of every saved Profile's name — one entry
+// each, none missing, none extra, none repeated — or it reports
+// db.ErrProfileOrderMismatch and changes nothing.
+func (s *AppService) ReorderProfiles(names []string) error {
+	return s.profiles.Reorder(names)
 }
 
 // GetProfile returns the Profile saved under name, or db.ErrProfileNotFound.

@@ -59,7 +59,7 @@ func (a *App) Shutdown(ctx context.Context) {
 	a.svc.Close()
 }
 
-// ListProfiles returns every saved Profile, ordered by name. The connection
+// ListProfiles returns every saved Profile, in saved order. The connection
 // manager UI uses this both to render the Profile list and to populate the
 // edit form, so no separate GetProfile binding is exposed.
 func (a *App) ListProfiles() ([]db.Profile, error) {
@@ -71,6 +71,14 @@ func (a *App) ListProfiles() ([]db.Profile, error) {
 // leaves the keychain untouched.
 func (a *App) SaveProfile(profile db.Profile, password string) error {
 	return a.svc.SaveProfile(profile, password)
+}
+
+// ReorderProfiles rewrites the saved Profile order to match names exactly —
+// the connection manager's drag-to-reorder. names must be a permutation of
+// every saved Profile's name; a missing, extra, or duplicated name is
+// rejected without changing anything.
+func (a *App) ReorderProfiles(names []string) error {
+	return a.svc.ReorderProfiles(names)
 }
 
 // DeleteProfile removes the Profile saved under name along with its

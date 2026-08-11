@@ -14,10 +14,11 @@
     DeleteProfile,
     Disconnect,
     ListProfiles,
+    ReorderProfiles,
     SaveProfile,
     TestConnection,
   } from "../../wailsjs/go/app/App";
-  import type { db } from "../../wailsjs/go/models";
+  import { db } from "../../wailsjs/go/models";
   import { reloadConfigured } from "./schema.svelte";
 
   let { onConnectionsChanged }: { onConnectionsChanged: () => void } = $props();
@@ -87,6 +88,33 @@
     }
   }
 
+  // Handles a drop from ProfileList's drag-to-reorder: change is already the
+  // fully computed new name order, plus the dragged Profile's Group if the
+  // drop moved it between groups. The Group write goes through SaveProfile —
+  // the same password-preserving path the form uses (an empty password
+  // leaves the keychain untouched) — before the order write, since Save
+  // replaces a Profile in place rather than moving it, so it cannot disturb
+  // the order Reorder is about to set.
+  async function handleReorder(change: { name: string; group: string; order: string[] }) {
+    try {
+      const dragged = profiles.find((p) => p.Name === change.name);
+      if (dragged !== undefined && (dragged.Group ?? "") !== change.group) {
+        await SaveProfile(new db.Profile({ ...dragged, Group: change.group }), "");
+      }
+      await ReorderProfiles(change.order);
+      await refresh();
+      if (dragged !== undefined && (dragged.Group ?? "") !== change.group) {
+        // Only a Group change touches what reloadConfigured cares about
+        // (Database, Engine) — by going through SaveProfile at all, not by
+        // anything about Group itself — but it costs nothing to keep this
+        // exactly as careful as handleSave.
+        void reloadConfigured();
+      }
+    } catch (err) {
+      formError = String(err);
+    }
+  }
+
   async function handleDelete(name: string) {
     try {
       await DeleteProfile(name);
@@ -140,7 +168,14 @@
   }
 </script>
 
-<ProfileList {profiles} {selectedName} {connectedProfiles} onSelect={handleSelect} onCreate={handleCreate} />
+<ProfileList
+  {profiles}
+  {selectedName}
+  {connectedProfiles}
+  onSelect={handleSelect}
+  onCreate={handleCreate}
+  onReorder={handleReorder}
+/>
 
 <main class="flex flex-1 overflow-y-auto bg-surface">
   {#if mode === "empty"}
@@ -176,6 +211,7 @@
     <div class="w-full max-w-xl px-8 py-7">
       <ProfileForm
         profile={selectedProfile}
+        {profiles}
         error={formError}
         isConnected={isSelectedConnected}
         {testing}

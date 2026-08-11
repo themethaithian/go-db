@@ -39,6 +39,14 @@ type Profile struct {
 	// connection; otherwise Host is resolved and dialled on the bastion rather
 	// than here, so it may be a name that means nothing on this machine.
 	SSH *SSHTunnel `toml:"ssh,omitempty"`
+
+	// Group is a free-text label the connection manager UI clusters Profiles
+	// by. It is entirely the human's own naming — ProfileStore does not
+	// validate it beyond the caller's own trimming — and empty means
+	// ungrouped, which is why it is written omitempty: a Profile nobody
+	// grouped round-trips as no key at all, exactly like an unset Engine
+	// before it is normalized.
+	Group string `toml:"group,omitempty"`
 }
 
 // Address returns the host:port this Profile is reached at, defaulting an

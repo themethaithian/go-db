@@ -12,6 +12,7 @@
   // this component only renders it and reports user intent through callbacks.
   let {
     profile,
+    profiles,
     error,
     isConnected,
     testing,
@@ -23,6 +24,9 @@
     onDisconnect,
   }: {
     profile: db.Profile | null;
+    /** Every saved Profile, for the Group field's suggestion list — the same
+     * list the parent already holds, read rather than duplicated. */
+    profiles: db.Profile[];
     error: string | null;
     isConnected: boolean;
     testing: boolean;
@@ -34,6 +38,16 @@
     onDisconnect: () => void;
   } = $props();
 
+  // The groups already in use, for the Group field's <datalist> — every
+  // distinct non-empty Group among the saved Profiles, in first-seen order.
+  let knownGroups = $derived.by(() => {
+    const seen = new Set<string>();
+    for (const p of profiles) {
+      if (p.Group) seen.add(p.Group);
+    }
+    return [...seen];
+  });
+
   let isEditing = $derived(profile !== null);
 
   let name = $state("");
@@ -41,6 +55,7 @@
   let port = $state(3306);
   let user = $state("");
   let database = $state("");
+  let group = $state("");
   let password = $state("");
   let confirmingDelete = $state(false);
 
@@ -157,6 +172,7 @@
     port = profile?.Port ?? 3306;
     user = profile?.User ?? "";
     database = profile?.Database ?? "";
+    group = profile?.Group ?? "";
     password = "";
     // An unset Engine is the backend's own signal for "mysql" (its Profile
     // store normalizes it that way) — read the same way schema.svelte.ts
@@ -188,6 +204,7 @@
       Port: port,
       User: user,
       Database: database,
+      Group: group.trim(),
       Engine: engine,
       SSH: sshEnabled
         ? new db.SSHTunnel({
@@ -383,6 +400,24 @@
           placeholder={engine === "mongodb" ? "" : "optional"}
           required={engine === "mongodb"}
         />
+      </label>
+
+      <label class="{labelClass} col-span-4">
+        <span class="flex items-center justify-between">
+          <span>Group</span>
+          <span class="font-normal text-text-subtle">optional</span>
+        </span>
+        <input
+          class={fieldClass}
+          bind:value={group}
+          list="profile-group-suggestions"
+          placeholder="Ungrouped"
+        />
+        <datalist id="profile-group-suggestions">
+          {#each knownGroups as knownGroup (knownGroup)}
+            <option value={knownGroup}></option>
+          {/each}
+        </datalist>
       </label>
 
       <label class="{labelClass} col-span-4">

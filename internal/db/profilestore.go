@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 
 	"github.com/pelletier/go-toml/v2"
@@ -25,6 +24,11 @@ var ErrProfileNameRequired = errors.New("db: profile name is required")
 // disk, where every later reader would trust it as though it were real.
 var ErrUnknownEngine = errors.New("db: unknown engine")
 
+// ErrProfileOrderMismatch reports that Reorder was not given exactly the
+// saved Profile names, once each: a missing name, an extra one, or a
+// duplicate. Reorder writes nothing when this is returned.
+var ErrProfileOrderMismatch = errors.New("db: reorder names do not match the saved profiles")
+
 const (
 	profilesFile = "profiles.toml"
 	dirPerm      = 0o700
@@ -36,6 +40,13 @@ const (
 // Profiles live in a single TOML file inside the store's directory; passwords
 // never appear there — they are handed to the Keychain port, keyed by Profile
 // name. The file layout is private to this package: callers see only Profiles.
+//
+// The file's order is the Profile list's order — not name, not save time, not
+// anything this package derives. It is the connection manager's own manual
+// ordering (and optional grouping), so the store has no business having an
+// opinion about it: Save appends a new Profile at the end and leaves an
+// existing one exactly where it was, and only Reorder ever rearranges the
+// list, deliberately, at the human's request.
 //
 // A ProfileStore reads through to disk on every call, so a store constructed
 // over a directory an earlier run wrote sees exactly that run's Profiles. It is
@@ -170,12 +181,57 @@ func (s *ProfileStore) Credentials(name string) (Profile, string, error) {
 	return profile, secret, nil
 }
 
-// List returns every saved Profile, ordered by name.
+// List returns every saved Profile, in saved order — the file's own order,
+// which Save preserves and only Reorder changes.
 func (s *ProfileStore) List() ([]Profile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.load()
+}
+
+// Reorder rewrites the saved Profile list so it holds exactly the Profiles
+// named by names, in that order. names must be a permutation of every saved
+// Profile's name — one entry each, none missing, none extra, none repeated —
+// or Reorder reports ErrProfileOrderMismatch and writes nothing. It touches
+// no Profile's fields and no keychain secret; it only rearranges.
+func (s *ProfileStore) Reorder(names []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	profiles, err := s.load()
+	if err != nil {
+		return err
+	}
+	if err := validateOrder(profiles, names); err != nil {
+		return err
+	}
+
+	reordered := make([]Profile, len(names))
+	for i, name := range names {
+		reordered[i] = profiles[indexOf(profiles, name)]
+	}
+	return s.store(reordered)
+}
+
+// validateOrder reports ErrProfileOrderMismatch unless names is exactly a
+// permutation of profiles' names: same count, no name missing or repeated,
+// nothing named that is not actually saved.
+func validateOrder(profiles []Profile, names []string) error {
+	if len(names) != len(profiles) {
+		return fmt.Errorf("%w: got %d names, %d profiles are saved", ErrProfileOrderMismatch, len(names), len(profiles))
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			return fmt.Errorf("%w: %q appears more than once", ErrProfileOrderMismatch, name)
+		}
+		seen[name] = true
+		if indexOf(profiles, name) < 0 {
+			return fmt.Errorf("%w: %q is not a saved profile", ErrProfileOrderMismatch, name)
+		}
+	}
+	return nil
 }
 
 // profileFile is the on-disk shape of the Profile list. It exists so the TOML
@@ -184,7 +240,8 @@ type profileFile struct {
 	Profiles []Profile `toml:"profile"`
 }
 
-// load reads the Profile list from disk, ordered by name. A store whose
+// load reads the Profile list from disk, in the order the file holds it — no
+// resorting; that order belongs to the human, not this package. A store whose
 // directory or file does not exist yet holds no Profiles.
 //
 // This is the one place an empty Engine is normalized to EngineMySQL: a
@@ -209,16 +266,13 @@ func (s *ProfileStore) load() ([]Profile, error) {
 			file.Profiles[i].Engine = EngineMySQL
 		}
 	}
-	sortByName(file.Profiles)
 	return file.Profiles, nil
 }
 
-// store writes the Profile list to disk, ordered by name so the file is stable
-// across runs. The write is atomic: a crash mid-write leaves the previous list
-// intact rather than a truncated one.
+// store writes the Profile list to disk exactly as given — profiles' order is
+// the file's order, unchanged. The write is atomic: a crash mid-write leaves
+// the previous list intact rather than a truncated one.
 func (s *ProfileStore) store(profiles []Profile) error {
-	sortByName(profiles)
-
 	data, err := toml.Marshal(profileFile{Profiles: profiles})
 	if err != nil {
 		return fmt.Errorf("db: encoding profiles: %w", err)
@@ -256,10 +310,6 @@ func (s *ProfileStore) store(profiles []Profile) error {
 
 func (s *ProfileStore) path() string {
 	return filepath.Join(s.dir, profilesFile)
-}
-
-func sortByName(profiles []Profile) {
-	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Name < profiles[j].Name })
 }
 
 func indexOf(profiles []Profile, name string) int {

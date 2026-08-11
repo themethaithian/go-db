@@ -350,23 +350,22 @@ func TestConfigDirAndFilePermissions(t *testing.T) {
 	}
 }
 
-func TestListProfilesOrderIsStable(t *testing.T) {
+func TestListProfilesOrderIsSavedOrder(t *testing.T) {
 	dir := t.TempDir()
 	keychain := dbtest.NewFakeKeychain()
 	svc := newFacade(t, dir, keychain)
 
-	for _, name := range []string{"zeta", "alpha", "Mid", "beta"} {
+	want := []string{"zeta", "alpha", "Mid", "beta"}
+	for _, name := range want {
 		mustSave(t, svc, db.Profile{Name: name, Host: name + ".internal", Port: 3306, User: "root"}, "secret")
 	}
-
-	want := []string{"Mid", "alpha", "beta", "zeta"}
 
 	listed, err := svc.ListProfiles()
 	if err != nil {
 		t.Fatalf("ListProfiles: %v", err)
 	}
 	if got := profileNames(listed); !equalStrings(got, want) {
-		t.Errorf("ListProfiles = %v, want %v", got, want)
+		t.Errorf("ListProfiles = %v, want %v (the order they were saved in)", got, want)
 	}
 
 	// The same order must come back after a restart, and after a delete.
@@ -379,15 +378,47 @@ func TestListProfilesOrderIsStable(t *testing.T) {
 		t.Errorf("ListProfiles after restart = %v, want %v", got, want)
 	}
 
-	if err := restarted.DeleteProfile("beta"); err != nil {
+	if err := restarted.DeleteProfile("alpha"); err != nil {
 		t.Fatalf("DeleteProfile: %v", err)
 	}
 	listed, err = restarted.ListProfiles()
 	if err != nil {
 		t.Fatalf("ListProfiles after delete: %v", err)
 	}
-	if got := profileNames(listed); !equalStrings(got, []string{"Mid", "alpha", "zeta"}) {
-		t.Errorf("ListProfiles after delete = %v, want [Mid alpha zeta]", got)
+	if got := profileNames(listed); !equalStrings(got, []string{"zeta", "Mid", "beta"}) {
+		t.Errorf("ListProfiles after delete = %v, want [zeta Mid beta]", got)
+	}
+}
+
+func TestReorderProfilesPermutesSavedOrder(t *testing.T) {
+	dir := t.TempDir()
+	keychain := dbtest.NewFakeKeychain()
+	svc := newFacade(t, dir, keychain)
+
+	for _, name := range []string{"zeta", "alpha", "Mid"} {
+		mustSave(t, svc, db.Profile{Name: name, Host: name + ".internal", Port: 3306, User: "root"}, "secret")
+	}
+
+	want := []string{"Mid", "zeta", "alpha"}
+	if err := svc.ReorderProfiles(want); err != nil {
+		t.Fatalf("ReorderProfiles: %v", err)
+	}
+
+	listed, err := svc.ListProfiles()
+	if err != nil {
+		t.Fatalf("ListProfiles: %v", err)
+	}
+	if got := profileNames(listed); !equalStrings(got, want) {
+		t.Errorf("ListProfiles after ReorderProfiles = %v, want %v", got, want)
+	}
+}
+
+func TestReorderProfilesRejectsAMismatchedList(t *testing.T) {
+	svc := newFacade(t, t.TempDir(), dbtest.NewFakeKeychain())
+	mustSave(t, svc, db.Profile{Name: "known", Host: "known.internal", Port: 3306, User: "root"}, "secret")
+
+	if err := svc.ReorderProfiles([]string{"known", "nope"}); !errors.Is(err, db.ErrProfileOrderMismatch) {
+		t.Errorf("ReorderProfiles error = %v, want ErrProfileOrderMismatch", err)
 	}
 }
 

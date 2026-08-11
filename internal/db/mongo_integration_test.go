@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -412,6 +413,66 @@ func TestIntegrationMongoDriver(t *testing.T) {
 		}
 		if dropped != 0 {
 			t.Errorf("Exec(drop) affected = %d, want 0 — dropping is not a counted change", dropped)
+		}
+	})
+
+	// The Explorer's introspection, against a real catalogue: the database-level
+	// read the Database tree browses a MongoDB Profile with, seeded with
+	// collections it must find among whatever else the run has left behind.
+	t.Run("getCollectionNames lists the database's collections", func(t *testing.T) {
+		conn, ctx := openMongo(t, address)
+		first := freshMongoCollection(t, ctx, conn)
+		second := freshMongoCollection(t, ctx, conn)
+
+		// A collection exists once something is in it.
+		for _, collection := range []string{first, second} {
+			if _, err := conn.Exec(ctx, `db.`+collection+`.insertOne({seeded: true})`); err != nil {
+				t.Fatalf("Exec(insertOne) into %s: %v", collection, err)
+			}
+		}
+
+		result, err := conn.ReadQuery(ctx, "db.getCollectionNames()")
+		if err != nil {
+			t.Fatalf("ReadQuery(getCollectionNames): %v", err)
+		}
+		if got := result.Kind(); got != db.ResultDocuments {
+			t.Fatalf("Kind() = %q, want %q — MongoDB answers with documents", got, db.ResultDocuments)
+		}
+		set, ok := result.Documents()
+		if !ok {
+			t.Fatal("Documents() reported the arm absent on a Result tagged documents")
+		}
+		if len(set.Documents) != 1 {
+			t.Fatalf("documents = %d, want the one document the names are rendered as", len(set.Documents))
+		}
+
+		var document struct {
+			Collections []string `json:"collections"`
+		}
+		if err := json.Unmarshal(set.Documents[0], &document); err != nil {
+			t.Fatalf("reading the rendered document: %v", err)
+		}
+		for _, want := range []string{first, second} {
+			if !slices.Contains(document.Collections, want) {
+				t.Errorf("collections = %v, want it to hold %q", document.Collections, want)
+			}
+		}
+		if !slices.IsSorted(document.Collections) {
+			t.Errorf("collections = %v, want them sorted so two refreshes agree", document.Collections)
+		}
+	})
+
+	// The other side of the same coin: the database-level form is one call, and
+	// the classifier is the only thing between dropDatabase() and a database
+	// that is no longer there.
+	t.Run("a database-level mutation never reaches the server", func(t *testing.T) {
+		conn, ctx := openMongo(t, address)
+
+		if _, err := conn.ReadQuery(ctx, "db.dropDatabase()"); !errors.Is(err, db.ErrWriteAttempt) {
+			t.Fatalf("ReadQuery(dropDatabase) error = %v, want it refused as a write attempt", err)
+		}
+		if _, err := conn.ReadQuery(ctx, "db.getCollectionNames()"); err != nil {
+			t.Fatalf("the database is gone or unreadable after a refused dropDatabase: %v", err)
 		}
 	})
 

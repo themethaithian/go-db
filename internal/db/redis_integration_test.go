@@ -182,6 +182,80 @@ func TestIntegrationRedisDriver(t *testing.T) {
 		}
 	})
 
+	// The Explorer's introspection, against a real keyspace. The Database tree
+	// lists a Redis Profile's keys by paging SCAN through ReadQuery — the loop
+	// itself lives in internal/service, which has no server of its own — so
+	// what is proved here is the contract that loop is written against: SCAN is
+	// a read the classifier and the adapter both allow, and a real server
+	// answers it with a cursor and a page of keys, cursor 0 ending the walk.
+	t.Run("SCAN pages a keyspace through the read path", func(t *testing.T) {
+		conn, ctx := openRedis(t, address, "9")
+
+		// An index of this test's own, emptied first: SCAN answers for the
+		// whole database, so a shared one would make this test's answer
+		// whatever the rest of the file had left behind.
+		if _, err := conn.Exec(ctx, "FLUSHDB"); err != nil {
+			t.Fatalf("Exec(FLUSHDB): %v", err)
+		}
+
+		const seeded = 250
+		want := make(map[string]bool, seeded)
+		for i := 0; i < seeded; i++ {
+			key := fmt.Sprintf("scan:key:%03d", i)
+			if _, err := conn.Exec(ctx, "SET "+key+" v"); err != nil {
+				t.Fatalf("Exec(SET %s): %v", key, err)
+			}
+			want[key] = true
+		}
+
+		found := make(map[string]bool, seeded)
+		cursor := "0"
+		for pages := 0; ; pages++ {
+			if pages > 32 {
+				t.Fatal("the scan never reached cursor 0")
+			}
+
+			result, err := conn.ReadQuery(ctx, "SCAN "+cursor+" COUNT 1000")
+			if err != nil {
+				t.Fatalf("ReadQuery(SCAN): %v", err)
+			}
+			if got := result.Kind(); got != db.ResultValue {
+				t.Fatalf("Kind() = %q, want %q — Redis answers with one typed value", got, db.ResultValue)
+			}
+
+			reply, _ := result.Value()
+			if reply.Kind != db.ReplyArray || len(reply.Items) != 2 {
+				t.Fatalf("reply = %#v, want an array of a cursor and a page of keys", reply)
+			}
+			if reply.Items[0].Kind != db.ReplyString {
+				t.Fatalf("cursor = %#v, want it as text", reply.Items[0])
+			}
+			if reply.Items[1].Kind != db.ReplyArray {
+				t.Fatalf("page = %#v, want a list of keys", reply.Items[1])
+			}
+			for _, item := range reply.Items[1].Items {
+				if item.Kind != db.ReplyString {
+					t.Fatalf("key = %#v, want it as text", item)
+				}
+				found[item.Text] = true
+			}
+
+			cursor = reply.Items[0].Text
+			if cursor == "0" {
+				break
+			}
+		}
+
+		for key := range want {
+			if !found[key] {
+				t.Errorf("the scan never returned %q, want every seeded key", key)
+			}
+		}
+		if len(found) != seeded {
+			t.Errorf("the scan returned %d keys, want the %d seeded", len(found), seeded)
+		}
+	})
+
 	t.Run("Ping answers on a live connection", func(t *testing.T) {
 		conn, ctx := openRedis(t, address, "")
 

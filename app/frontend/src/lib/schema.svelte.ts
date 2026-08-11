@@ -12,6 +12,15 @@
 // show under it is what the server has. A Profile that does name one is
 // opened on it, so nothing changes for the human who set one.
 //
+// The three levels hold on every Engine, and the words are MySQL's only
+// because it got here first (ADR-0006). A Redis Profile's one "database" is
+// the index it is connected on and its "tables" are that index's keys; a
+// MongoDB Profile's one database is the one it names and its tables are its
+// collections. The backend decides all of that — this module asks
+// ListDatabases and ListTables and does not know which read answered — with
+// one exception it does have to know about: columns and indexes are MySQL's
+// alone, so hasStructure below gates the two calls that ask for them.
+//
 // Caching is per Profile *and* database, and lasts until refresh: databases
 // are fetched the first time a Profile is expanded, a database's tables the
 // first time that database is expanded, a table's columns the first time that
@@ -58,13 +67,23 @@ export type TableNode = {
   indexesError: string | null;
 };
 
-/** One database under a Profile, plus its lazily loaded tables. */
+/**
+ * One database under a Profile, plus its lazily loaded tables — which are its
+ * keys on Redis and its collections on MongoDB, in the same field, because the
+ * tree does the same thing with all three.
+ */
 export type DatabaseNode = {
   expanded: boolean;
   loading: boolean;
   /** null until the tables have been fetched at least once. */
   tables: TableNode[] | null;
   error: string | null;
+  /**
+   * Whether `tables` is everything there was. A Redis keyspace bigger than the
+   * backend's cap is cut, and the tree says so under the list rather than
+   * letting a short list read as a small database. Always false on MySQL.
+   */
+  truncated: boolean;
 };
 
 /** One connected Profile — a root of the tree. */
@@ -183,7 +202,7 @@ function freshProfile(): ProfileNode {
 }
 
 function freshDatabase(): DatabaseNode {
-  return { expanded: false, loading: false, tables: null, error: null };
+  return { expanded: false, loading: false, tables: null, error: null, truncated: false };
 }
 
 // What a node looks like in the instant between the thing it stands for
@@ -298,14 +317,17 @@ export function engineOf(profileName: string | null): string {
 }
 
 /**
- * Whether profileName's Engine can be asked to introspect its own schema —
- * only MySQL can today (ADR-0006). Redis and MongoDB have no databases,
- * tables or columns to list, so nothing here may fire ListDatabases,
- * ListTables, ListColumns or ListIndexes for one: the Database tree and the
- * Editor's database picker both read this before asking, in place of
- * finding out from a failed call.
+ * Whether profileName's Engine has a level below its tables: columns and
+ * indexes, which are MySQL's alone (ADR-0006). A Redis key has no columns and
+ * a MongoDB collection has no fixed ones, so nothing may fire ListColumns or
+ * ListIndexes for one — the backend refuses both in those words, and this is
+ * how the tree, the Structure view and the Editor's autocomplete avoid asking
+ * rather than finding out from a refusal.
+ *
+ * Databases and tables are not gated: every Engine answers those, which is
+ * the whole of what browsing a Redis or MongoDB Profile is.
  */
-export function introspectable(profileName: string | null): boolean {
+export function hasStructure(profileName: string | null): boolean {
   return engineOf(profileName) === MYSQL;
 }
 
@@ -333,6 +355,7 @@ export function refreshAll() {
       );
       schema.tables = null;
       schema.error = null;
+      schema.truncated = false;
       if (schema.expanded) void loadTables(profileName, database, expandedTables);
     }
     node.databases = null;
@@ -352,7 +375,12 @@ export function ensureTables(profileName: string, database: string) {
   if (node.tables === null && !node.loading) void loadTables(profileName, database);
 }
 
-/** Expands or collapses a table, loading its columns the first time. */
+/**
+ * Expands or collapses a table, loading its columns the first time. It is only
+ * ever reached on MySQL — a key and a collection have no columns row to
+ * expand, so the tree draws no caret for them — and ensureColumns holds that
+ * line itself rather than trusting the caller to.
+ */
 export function toggleTable(profileName: string, database: string, table: TableNode) {
   table.expanded = !table.expanded;
   if (table.expanded) ensureColumns(profileName, database, table);
@@ -385,11 +413,13 @@ export function findTable(
  * view can ask for columns without touching that unrelated UI state.
  */
 export function ensureColumns(profileName: string, database: string, table: TableNode) {
+  if (!hasStructure(profileName)) return;
   if (table.columns === null && !table.loading) void loadColumns(profileName, database, table);
 }
 
 /** The same as ensureColumns, for the indexes half of the cache. */
 export function ensureIndexes(profileName: string, database: string, table: TableNode) {
+  if (!hasStructure(profileName)) return;
   if (table.indexes === null && !table.indexesLoading) {
     void loadIndexes(profileName, database, table);
   }
@@ -405,6 +435,7 @@ export function refreshTableStructure(
   database: string,
   table: TableNode,
 ) {
+  if (!hasStructure(profileName)) return;
   table.columns = null;
   table.error = null;
   table.indexes = null;
@@ -458,11 +489,6 @@ export function reloadConfigured(): Promise<void> {
 
 async function loadDatabases(profileName: string) {
   const node = ensureProfile(profileName);
-  // A Profile whose Engine cannot be introspected has no ListDatabases to
-  // call — leaving node.databases null is what tells the tree and the
-  // Editor's picker to show their own placeholder instead of an error a
-  // non-SQL server was never going to answer.
-  if (!introspectable(profileName)) return;
   node.loading = true;
   node.error = null;
   try {
@@ -482,6 +508,13 @@ async function loadDatabases(profileName: string) {
     const home = configured[profileName] ?? "";
     if (home !== "" && names.includes(home)) {
       ensureDatabase(profileName, home).expanded = true;
+    }
+    // An Engine with exactly one database is opened on it too, whatever the
+    // Profile calls it. A Redis Profile that names no index still has one —
+    // index 0 — and a level with a single child that has to be clicked through
+    // is a level that is only in the way.
+    if (names.length === 1 && !hasStructure(profileName)) {
+      ensureDatabase(profileName, names[0]).expanded = true;
     }
     for (const name of names) {
       const schema = ensureDatabase(profileName, name);
@@ -503,10 +536,6 @@ async function loadTables(
   reExpand: Set<string> = new Set(),
 ) {
   const node = ensureDatabase(profileName, database);
-  // Same posture as loadDatabases: a non-introspectable Engine has no
-  // ListTables to call, including the Editor's autocomplete path, which
-  // asks for a tab's tables directly rather than through the tree.
-  if (!introspectable(profileName)) return;
   node.loading = true;
   node.error = null;
   try {
@@ -514,8 +543,10 @@ async function loadTables(
     if (result.status !== "ok") {
       node.error = result.message;
       node.tables = null;
+      node.truncated = false;
       return;
     }
+    node.truncated = result.truncated ?? false;
     node.tables = (result.tables ?? []).map((info) => ({
       name: info.name,
       rowEstimate: info.row_estimate ?? null,
@@ -533,6 +564,7 @@ async function loadTables(
   } catch (err) {
     node.error = String(err);
     node.tables = null;
+    node.truncated = false;
   } finally {
     node.loading = false;
   }

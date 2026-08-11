@@ -280,6 +280,47 @@ func TestClassifyMongoMutations(t *testing.T) {
 	})
 }
 
+// The database-level form, db.<verb>(...), is judged by a list of its own —
+// one entry long. The two lists must not leak into each other in either
+// direction: a collection read is not a database read (db.find({}) names no
+// collection and would run against one with no name), and a database read is
+// not a collection read.
+func TestClassifyMongoDatabaseLevelCalls(t *testing.T) {
+	runMongoCases(t, []mongoCase{
+		// The one entry.
+		{
+			name: "getCollectionNames", statement: "db.getCollectionNames()",
+			want: guard.Read, reason: "getCollectionNames",
+		},
+		{
+			name: "getCollectionNames with a trailing semicolon", statement: "db.getCollectionNames();",
+			want: guard.Read,
+		},
+
+		// A collection operation's name does not carry over: the allowlists are
+		// per form, and this one names no collection to run against.
+		{name: "a database-level find", statement: "db.find({})", want: guard.Mutation, reason: "find"},
+		{name: "a database-level aggregate", statement: "db.aggregate([{$match: {}}])", want: guard.Mutation},
+		{name: "a database-level countDocuments", statement: "db.countDocuments()", want: guard.Mutation},
+
+		// The traps: operations a reasonable person reaches for at this level.
+		{name: "dropDatabase", statement: "db.dropDatabase()", want: guard.Mutation, reason: "dropDatabase"},
+		{name: "createCollection", statement: `db.createCollection("t")`, want: guard.Mutation, reason: "createCollection"},
+		{name: "runCommand", statement: "db.runCommand({ping: 1})", want: guard.Mutation, reason: "runCommand"},
+		{name: "adminCommand", statement: "db.adminCommand({listDatabases: 1})", want: guard.Mutation, reason: "adminCommand"},
+		{name: "getSiblingDB", statement: `db.getSiblingDB("other")`, want: guard.Mutation, reason: "getSiblingDB"},
+		{name: "getCollectionInfos", statement: "db.getCollectionInfos()", want: guard.Mutation, reason: "getCollectionNames"},
+		{name: "stats", statement: "db.stats()", want: guard.Mutation},
+
+		// Unknown database-level operations, including one MongoDB might add
+		// after this list was written.
+		{name: "an unknown database operation", statement: "db.somethingNew()", want: guard.Mutation},
+
+		// A refusal is not a place to echo the input back.
+		{name: "a very long database operation name", statement: "db." + strings.Repeat("a", 5000) + "()", want: guard.Mutation},
+	})
+}
+
 // The depth bound belongs to the parser, and the classifier inherits it: a
 // filter nobody could have written by hand is refused rather than descended
 // into.

@@ -11,6 +11,15 @@
   // Profile that does name a database is opened on it (schema.svelte.ts), so
   // the human who set one still finds their tables one click in.
   //
+  // The same three levels carry the other two Engines (ADR-0006), and only the
+  // nouns change: a Redis Profile shows the one index it is connected on and
+  // that index's keys, a MongoDB Profile the one database it names and its
+  // collections. Both stop there — a key and a collection have no columns to
+  // expand — so their rows carry no caret, and everything else about them is
+  // the same row: the same filter, the same star, the same click that browses
+  // what is inside. The words come from engineNouns below, and nothing else in
+  // this component branches on the Engine.
+  //
   // MySQL's own schemas are listed too, last and dimmed: worth reading
   // occasionally, never what anyone connected for.
   //
@@ -30,10 +39,11 @@
   // scope; this component only renders them.
   import { untrack } from "svelte";
   import { isPinned, pinnedAmong, togglePin } from "./pins.svelte";
+  import { MONGODB, REDIS } from "./browse";
   import {
     databaseNode,
     engineOf,
-    introspectable,
+    hasStructure,
     isSystemDatabase,
     profileNode,
     refreshAll,
@@ -47,21 +57,29 @@
     type TableNode,
   } from "./schema.svelte";
 
-  // The label an Engine's own name reads as in prose — used only by the
-  // placeholder below, for an Engine that can reach this tree without being
-  // introspectable (ADR-0006: only MySQL has databases, tables and columns to
-  // list). Falls back to the raw Engine string for one this app does not
-  // know, the same fail-open-to-honesty posture the backend's own
-  // engineName takes.
-  function engineLabel(engine: string): string {
+  // What an Engine's two levels are called, for the handful of places the tree
+  // says a noun out loud: the empty state under a database, the truncation
+  // line, and the titles on the rows. Everything structural is shared — this
+  // is vocabulary, not behaviour.
+  //
+  // An Engine this app does not know falls back to MySQL's words rather than
+  // to the raw Engine string: the fallback is a label under a row that is
+  // already listed, and "tables" reads better there than a guess at a name.
+  type EngineNouns = { one: string; many: string; container: string };
+
+  function engineNouns(engine: string): EngineNouns {
     switch (engine) {
-      case "redis":
-        return "Redis";
-      case "mongodb":
-        return "MongoDB";
+      case REDIS:
+        return { one: "key", many: "keys", container: "database" };
+      case MONGODB:
+        return { one: "collection", many: "collections", container: "database" };
       default:
-        return engine;
+        return { one: "table", many: "tables", container: "schema" };
     }
+  }
+
+  function nounsOf(profileName: string): EngineNouns {
+    return engineNouns(engineOf(profileName));
   }
 
   let {
@@ -374,7 +392,9 @@
 <!-- One database and, when it is open, everything under it. -->
 {#snippet databaseRow(profileName: string, database: string)}
   {@const node = databaseNode(profileName, database)}
-  {@const system = isSystemDatabase(database)}
+  {@const nouns = nounsOf(profileName)}
+  {@const structured = hasStructure(profileName)}
+  {@const system = structured && isSystemDatabase(database)}
   {@const visibleTables = node.tables !== null ? tablesToShow(database, node.tables) : null}
   <div class="flex items-center border-l-2 border-transparent pr-2 pl-5 hover:bg-surface-raised">
     <button
@@ -401,7 +421,9 @@
       type="button"
       class="flex h-6 min-w-0 flex-1 items-center gap-1.5 text-left"
       onclick={() => toggleDatabase(profileName, database)}
-      title={system ? `${database} — one of MySQL's own schemas` : `Show the tables in ${database}`}
+      title={system
+        ? `${database} — one of MySQL's own schemas`
+        : `Show the ${nouns.many} in ${database}`}
     >
       <svg
         class="h-3.5 w-3.5 shrink-0 {system ? 'text-text-subtle' : 'text-text-muted'}"
@@ -432,7 +454,9 @@
     {#if node.error !== null}
       <p class="py-1 pr-3 pl-12 text-sm text-danger">{node.error}</p>
     {:else if visibleTables !== null && visibleTables.length === 0}
-      <p class="py-1 pr-3 pl-12 text-sm text-text-subtle">No tables in this schema.</p>
+      <p class="py-1 pr-3 pl-12 text-sm text-text-subtle">
+        No {nouns.many} in this {nouns.container}.
+      </p>
     {:else if visibleTables !== null}
       {@const pinned = pinnedAmong(profileName, database, visibleTables)}
       {#if pinned.length > 0}
@@ -448,7 +472,7 @@
       {/if}
 
       {#each visibleTables as table (table.name)}
-        {@render tableRow(profileName, database, table, true)}
+        {@render tableRow(profileName, database, table, structured)}
 
         {#if table.expanded}
           {#if table.loading}
@@ -481,6 +505,16 @@
           {/if}
         {/if}
       {/each}
+
+      <!-- A list the backend cut says so where the list ends, in the same
+           voice a truncated result set uses: what is here is not all there
+           is. Only a Redis keyspace reaches the cap today. -->
+      {#if node.truncated}
+        <p class="py-1 pr-3 pl-12 text-xs text-text-subtle">
+          Showing the first {node.tables?.length ?? 0}
+          {nouns.many}; there are more.
+        </p>
+      {/if}
     {/if}
   {/if}
 {/snippet}
@@ -641,11 +675,7 @@
         </div>
 
         {#if node.expanded}
-          {#if !introspectable(profileName)}
-            <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">
-              Schema browsing for {engineLabel(engineOf(profileName))} arrives later.
-            </p>
-          {:else if node.error !== null}
+          {#if node.error !== null}
             <p class="py-1 pr-3 pl-8 text-sm text-danger">{node.error}</p>
           {:else if node.databases !== null && node.databases.length === 0}
             <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">No databases on this server.</p>

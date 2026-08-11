@@ -14,17 +14,23 @@ import (
 // equivalent, so whatever this function calls a read runs unapproved with
 // nothing to catch it.
 //
-// The read claim is made in three places, and all three are closed:
+// The read claim is made in four places, and all four are closed:
 //
 //   - The grammar. internal/mongoql accepts db.<collection>.<verb>(<args>) and
-//     nothing else — not JavaScript, which cannot be classified without being
-//     evaluated, and evaluating it is the hazard. A statement that will not
-//     parse is a Mutation, which is also the answer for SQL, a Redis command,
-//     a shell helper like "use db", and a buffer holding two calls.
+//     db.<verb>(<args>) and nothing else — not JavaScript, which cannot be
+//     classified without being evaluated, and evaluating it is the hazard. A
+//     statement that will not parse is a Mutation, which is also the answer for
+//     SQL, a Redis command, a shell helper like "use db", and a buffer holding
+//     two calls.
 //
-//   - mongoReads, the operations proven to only read. An operation absent from
-//     it waits at the Approval Gate, including one MongoDB adds after this
-//     table was written.
+//   - mongoReads, the collection operations proven to only read. An operation
+//     absent from it waits at the Approval Gate, including one MongoDB adds
+//     after this table was written.
+//
+//   - mongoDatabaseReads, the same for the database-level form, and a separate
+//     list rather than the same one because the two forms reach different
+//     operations: db.find({}) is not a find on anything, and a name proven at
+//     one level proves nothing at the other.
 //
 //   - mongoStages, for aggregate, whose argument is itself a list of
 //     operations. $out and $merge write; every other stage is judged by the
@@ -44,6 +50,10 @@ func ClassifyMongo(statement string) Classification {
 	call, err := mongoql.Parse(statement)
 	if err != nil {
 		return mutation(notTheGrammar + err.Error())
+	}
+
+	if call.OnDatabase() {
+		return classifyDatabaseCall(call)
 	}
 
 	// The traps are consulted first only so that their wording wins. Being
@@ -67,6 +77,32 @@ func ClassifyMongo(statement string) Classification {
 // line says what go-db does read, and the parser's own line says what stopped
 // it and where.
 const notTheGrammar = "go-db reads MongoDB as db.<collection>.<verb>(...) and nothing else: "
+
+// classifyDatabaseCall judges db.<verb>(...), the form that names no
+// collection.
+//
+// It is a separate function over a separate list because the two forms are
+// separate surfaces, and one shared list would be a way for a name proven at
+// one level to be waved through at the other — db.find({}) is not a find, and
+// db.users.getCollectionNames() is not a catalogue read.
+//
+// The arguments are not inspected, on the same ground the collection form
+// states: the one operation on the list cannot be turned into a write by an
+// argument. The adapter that runs it refuses arguments anyway, because
+// getCollectionNames() takes none — but that is a question of running the call
+// correctly, not of whether it writes.
+func classifyDatabaseCall(call mongoql.Call) Classification {
+	// Consulted first only so their wording wins, exactly as with the
+	// collection traps: absence from mongoDatabaseReads is what makes these
+	// mutations.
+	if why, trapped := mongoDatabaseTraps[call.Verb]; trapped {
+		return mutation("db." + call.Verb + "(), and " + why)
+	}
+	if mongoDatabaseReads[call.Verb] {
+		return read("db." + call.Verb + "() query")
+	}
+	return mutation("db." + call.Verb + "() is not on the list of database-level MongoDB operations proven to only read")
+}
 
 // classifyPipelineCall judges an aggregate, whose verdict is its pipeline's.
 //
@@ -224,9 +260,11 @@ func stageName(operator string) string {
 //     entirely: its out option names a collection to write.
 //
 // Scope is a client's day-to-day browsing: fetch documents, count them, list
-// the values of a field. Read-only operations outside that — index and
-// collection introspection, the admin surface — are deliberately absent,
-// because adding one later is cheap and removing one later is an incident.
+// the values of a field. Read-only operations outside that — index
+// introspection, the admin surface — are deliberately absent, because adding
+// one later is cheap and removing one later is an incident. Listing a
+// database's collections is the one catalogue read that has since been proven,
+// and it lives at the level it belongs to: see mongoDatabaseReads.
 var mongoReads = map[string]bool{
 	// find returns a cursor over matching documents. Its options page, sort,
 	// project and hint; none of them writes, and the write-side operations of
@@ -252,6 +290,78 @@ var mongoReads = map[string]bool{
 	// and ClassifyMongo routes it to classifyPipelineCall before this map is
 	// consulted.
 }
+
+// mongoDatabaseReads is the closed allowlist of database-level operations
+// proven to only read — the db.<verb>(...) form, which names no collection.
+//
+// It holds one entry, and the two rules governing mongoReads govern it: the
+// operation must have no form that writes, and no argument may turn it into
+// one. A third applies here and nowhere else, because this is the level the
+// admin surface lives on: the operation must be something a client browsing a
+// database needs. Everything else at this level — the command runners, the
+// database's own statistics, the session and shard surface — is absent, and the
+// tempting ones are named in mongoDatabaseTraps rather than merely left out.
+var mongoDatabaseReads = map[string]bool{
+	// getCollectionNames is mongosh's name for listCollections with
+	// nameOnly: true. The proof is what that command is: listCollections reads
+	// the database's own catalogue and returns an entry per collection, and
+	// nameOnly asks the server for nothing but the names — no statistics, no
+	// options, no index information, and nothing that touches a collection's
+	// documents. It has no writing form (a collection is created by
+	// createCollection or by writing to it), takes no argument in mongosh, and
+	// the filter the underlying command accepts selects which entries come back
+	// rather than doing anything to them. It is the catalogue equivalent of
+	// MySQL's SELECT over information_schema.tables, which is what the Database
+	// tree asks every other Engine.
+	"getCollectionNames": true,
+}
+
+// mongoDatabaseTraps is mongoTraps for the database-level form: operations that
+// would otherwise be refused with nothing but "not on the list", and what the
+// human missed. Each value completes the sentence "db.<verb>(), and ...".
+//
+// Being listed here changes no verdict — absence from mongoDatabaseReads is
+// what makes these mutations — and deleting an entry would lose the
+// explanation rather than the safety.
+var mongoDatabaseTraps = map[string]string{
+	// Writes, wearing a database-level name.
+	"dropDatabase":     "it deletes the database and everything in it",
+	"createCollection": "it creates a collection, which is a change to the database",
+	"createView":       "it creates a view, which is a change to the database",
+
+	// The command runners. Each takes a command document naming an operation
+	// go-db has not read, which is the whole difficulty: judging one would mean
+	// classifying every command MongoDB has, from inside an argument.
+	"runCommand":   commandRunner,
+	"adminCommand": commandRunner,
+	"aggregate":    "a database-level aggregation can name any collection from inside its pipeline; db.<collection>.aggregate([...]) is the form go-db judges",
+
+	// Reaching another database. go-db pins the database a Profile connects to,
+	// and the leading db is that database — a statement that could move to
+	// another one would run somewhere the Profile does not name.
+	"getSiblingDB":  "it moves to another database, and a go-db Profile names the one database its statements run in",
+	"getMongo":      "it reaches the connection itself, and go-db's MongoDB grammar works inside one database",
+	"getCollection": "it names a collection through a helper, and go-db's grammar names one plainly, as in db.users.find({})",
+
+	// Reads on the admin surface. They read, but each would need its own
+	// argument read and its own proof, and none has one yet.
+	"getCollectionInfos": "it returns every collection's full definition; getCollectionNames() is the catalogue read proven to only read",
+	"stats":              databaseAdminSurface,
+	"serverStatus":       databaseAdminSurface,
+	"hostInfo":           databaseAdminSurface,
+	"currentOp":          databaseAdminSurface,
+	"killOp":             "it stops an operation somebody else is running, and " + databaseAdminSurface,
+	"getUsers":           databaseAdminSurface,
+	"getRoles":           databaseAdminSurface,
+
+	// watch, one level up from the collection trap of the same name.
+	"watch": "it opens a change stream and holds the connection open, waiting for changes that have not happened yet",
+}
+
+const (
+	commandRunner        = "it runs a command named inside its argument, and go-db classifies operations by reading them rather than by trusting what they are called"
+	databaseAdminSurface = "database administration is not on the list of MongoDB operations proven to only read"
+)
 
 // mongoStages is the closed allowlist of aggregation stages proven to only
 // read: a pipeline is a read when every one of its stages is here, and a stage

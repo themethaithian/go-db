@@ -176,6 +176,92 @@ func TestParseAcceptsTheGrammar(t *testing.T) {
 	}
 }
 
+// The database-level form: db.<verb>(<args>), naming no collection. It is the
+// second and last shape the grammar has, and the parser tells the two apart by
+// what follows the name after db — a bracket makes it an operation on the
+// database, a dot makes it a collection.
+//
+// Parsing one is not accepting it: the classifier's own database-level
+// allowlist is what decides whether it runs, and it holds one entry.
+func TestParseAcceptsDatabaseLevelCalls(t *testing.T) {
+	cases := []struct {
+		name      string
+		statement string
+		verb      string
+		args      []string
+	}{
+		{
+			name:      "the collection names of the database",
+			statement: "db.getCollectionNames()",
+			verb:      "getCollectionNames", args: []string{},
+		},
+		{
+			name:      "one trailing semicolon",
+			statement: "db.getCollectionNames();",
+			verb:      "getCollectionNames", args: []string{},
+		},
+		{
+			name:      "whitespace between every token",
+			statement: "  db\n  .\n  getCollectionNames\n  (\n  )\n  ",
+			verb:      "getCollectionNames", args: []string{},
+		},
+		{
+			// Parsed, and refused by the classifier — which is the division of
+			// labour: the grammar reads the shape, the allowlist judges the verb.
+			name:      "a database operation with arguments",
+			statement: `db.runCommand({ping: 1})`,
+			verb:      "runCommand", args: []string{`{"ping":1}`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call, err := mongoql.Parse(tc.statement)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tc.statement, err)
+			}
+			if !call.OnDatabase() {
+				t.Errorf("OnDatabase() = false, want true for %q", tc.statement)
+			}
+			if call.Collection != "" {
+				t.Errorf("Collection = %q, want empty — this form names none", call.Collection)
+			}
+			if call.Verb != tc.verb {
+				t.Errorf("Verb = %q, want %q", call.Verb, tc.verb)
+			}
+			if len(call.Args) != len(tc.args) {
+				t.Fatalf("got %d arguments, want %d", len(call.Args), len(tc.args))
+			}
+			for i, want := range tc.args {
+				if got := call.Args[i].JSON(); got != want {
+					t.Errorf("argument %d rendered as %s, want %s", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// The two forms are told apart, and a collection call still says so. Without
+// this the database form would be a way to make a collection call look like
+// something it is not to a caller that only reads Verb.
+func TestParseTellsTheTwoFormsApart(t *testing.T) {
+	collection, err := mongoql.Parse("db.users.find({})")
+	if err != nil {
+		t.Fatalf("Parse(collection call): %v", err)
+	}
+	if collection.OnDatabase() {
+		t.Error("OnDatabase() = true for db.users.find({}), want false")
+	}
+
+	database, err := mongoql.Parse("db.getCollectionNames()")
+	if err != nil {
+		t.Fatalf("Parse(database call): %v", err)
+	}
+	if !database.OnDatabase() {
+		t.Error("OnDatabase() = false for db.getCollectionNames(), want true")
+	}
+}
+
 // Every refusal below is a Mutation once the classifier sees it, so the list is
 // as much a safety claim as the classifier's own table: anything the parser
 // lets through is something the verb allowlist then has to be right about.
@@ -211,6 +297,13 @@ func TestParseRefuses(t *testing.T) {
 		{name: "a collection starting with a digit", statement: "db.2users.find({})", says: "collection"},
 		{name: "a collection with a dollar in it", statement: "db.us$ers.find({})"},
 		{name: "a hyphenated collection", statement: "db.user-events.find({})"},
+
+		// The database-level form is one call too, and nothing may be chained
+		// onto it — which is also what db.getCollection("x").find({}) is.
+		{name: "a database call with no parentheses", statement: "db.getCollectionNames"},
+		{name: "a chained database call", statement: "db.getCollectionNames().length", says: "chaining"},
+		{name: "a second call after a database call", statement: "db.getCollectionNames(); db.a.drop()", says: "one"},
+		{name: "an unclosed database call", statement: "db.getCollectionNames("},
 
 		// One call, exactly. A second one cannot hide in any splice position.
 		{name: "two calls separated by a semicolon", statement: "db.a.find({}); db.b.drop()", says: "one"},

@@ -1,6 +1,7 @@
-// Package mongoql parses the one statement shape go-db accepts for MongoDB:
+// Package mongoql parses the two statement shapes go-db accepts for MongoDB:
 //
 //	db.<collection>.<verb>(<arguments>)
+//	db.<verb>(<arguments>)
 //
 // It is not JavaScript, and that is the whole point (ADR-0006). mongosh's
 // language cannot be classified without evaluating it, and evaluating it is the
@@ -9,10 +10,19 @@
 // out on purpose, and every refusal below says what to write instead where
 // there is an answer.
 //
+// The second shape is an operation on the database itself rather than on one of
+// its collections — db.getCollectionNames() and nothing else worth writing here,
+// since which database-level operations may run is the classifier's list and not
+// the grammar's. The parser only has to tell the two shapes apart, and it does
+// so by the one character that distinguishes them: after db.<name>, a "(" makes
+// the name an operation on the database, and a "." makes it a collection.
+//
 // The accepted grammar, in full:
 //
-//	statement   = ws , "db" , ws , "." , ws , collection , ws , "." , ws , verb ,
-//	              ws , "(" , arguments , ")" , ws , [ ";" , ws ] ;
+//	statement   = ws , "db" , ws , "." , ws , ( collection call | database call ) ,
+//	              ws , [ ";" , ws ] ;
+//	collection call = collection , ws , "." , ws , verb , ws , "(" , arguments , ")" ;
+//	database call   = verb , ws , "(" , arguments , ")" ;
 //	collection  = identifier ;
 //	verb        = identifier ;
 //	identifier  = ( letter | "_" ) , { letter | digit | "_" } ;
@@ -38,9 +48,11 @@
 //     properly rather than matched with a pattern, so a ")" inside a quoted
 //     string does not end the call and a call inside one is only text.
 //
-//   - One plain collection name. db.getCollection("x"), db["x"] and dotted
-//     names are refused: each is another way to name a collection, and each
-//     would be another shape to be right about.
+//   - One plain collection name. db["x"] and dotted names are refused: each is
+//     another way to name a collection, and each would be another shape to be
+//     right about. db.getCollection("x") parses as a database-level call — it
+//     is one, syntactically — and is refused the moment anything is chained
+//     onto it, in the words of the collection form it was reaching for.
 //
 //   - JSON values only. No function calls, so no ObjectId(...), ISODate(...) or
 //     NumberLong(...) — MongoDB's extended JSON writes all of those as ordinary
@@ -74,17 +86,34 @@ import (
 	"unicode/utf8"
 )
 
-// Call is one statement in the grammar: an operation on one collection, with
-// the arguments it was given, in order.
+// Call is one statement in the grammar: an operation on one collection or on
+// the database itself, with the arguments it was given, in order.
 //
 // Collection and Verb are exactly as written — MongoDB is case-sensitive about
 // both, so nothing is folded. Args is nil for a call written with empty
 // parentheses.
+//
+// Which of the two forms a Call is, is Collection: a database-level call names
+// no collection, and its Collection is empty. That is the representation rather
+// than a flag beside it, and deliberately so — a flag is a second copy of a fact
+// the field already carries, and two copies can disagree. The grammar makes the
+// reading safe: a collection is an identifier, an identifier is at least one
+// character, so an empty Collection is a thing the collection form cannot
+// produce. OnDatabase is how callers ask, so the reasoning above lives in one
+// place instead of at every comparison against "".
 type Call struct {
 	Collection string
 	Verb       string
 	Args       []Value
 }
+
+// OnDatabase reports whether this call is the database-level form,
+// db.<verb>(...), which names no collection.
+//
+// Every caller that runs a Call must ask: the two forms reach different
+// operations on the server, and a database-level verb handed to a collection is
+// an operation on a collection with no name.
+func (c Call) OnDatabase() bool { return c.Collection == "" }
 
 const (
 	// maxStatementBytes is generous by design: a pipeline with a large $in list
@@ -144,24 +173,28 @@ func (p *parser) parseCall() (Call, error) {
 
 	p.skipSpace()
 	if p.peek() != '.' {
-		return Call{}, p.errorAt(p.pos, "after db go-db expects .<collection>, and its MongoDB grammar has no other way to name a collection")
+		return Call{}, p.errorAt(p.pos, "after db go-db expects .<collection>.<operation>(...), and its MongoDB grammar has no other way to name a collection")
 	}
 	p.pos++
 
+	// The one name both forms start with: a collection when a dot follows it, an
+	// operation on the database when a bracket does. Nothing before this point
+	// can tell them apart, and nothing after it has to guess.
 	p.skipSpace()
-	collection, err := p.identifier("collection")
+	name, err := p.identifier("collection")
 	if err != nil {
 		return Call{}, err
 	}
 
 	p.skipSpace()
-	if p.peek() == '(' {
-		return Call{}, p.errorAt(p.pos, "the collection must be a plain name, as in db.users.find(...): the grammar has no collection helpers")
-	}
-	if p.peek() != '.' {
+	switch p.peek() {
+	case '(':
+		return p.finishCall("", name)
+	case '.':
+		p.pos++
+	default:
 		return Call{}, p.errorAt(p.pos, "after the collection go-db expects .<operation>(...), on one plain collection name")
 	}
-	p.pos++
 
 	p.skipSpace()
 	verb, err := p.identifier("operation")
@@ -173,7 +206,14 @@ func (p *parser) parseCall() (Call, error) {
 	if p.peek() != '(' {
 		return Call{}, p.errorAt(p.pos, "the operation must be called, as in db.users.find({}), and its arguments go in the brackets")
 	}
-	p.pos++
+	return p.finishCall(name, verb)
+}
+
+// finishCall reads the argument list of either form and the punctuation after
+// it, with the opening bracket unread. collection is empty for the
+// database-level form.
+func (p *parser) finishCall(collection, verb string) (Call, error) {
+	p.pos++ // '('
 
 	args, err := p.arguments()
 	if err != nil {
@@ -189,6 +229,13 @@ func (p *parser) parseCall() (Call, error) {
 		p.skipSpace()
 	}
 	if !p.atEnd() {
+		// A dot after a database-level call is db.getCollection("x").find(...)
+		// and its relatives: a helper that names a collection and then works on
+		// it. It is refused for chaining like anything else, but the human is
+		// told the thing they actually need to know.
+		if collection == "" && p.peek() == '.' {
+			return Call{}, p.errorAt(p.pos, "the collection must be a plain name, as in db.users.find(...): the grammar has no collection helpers and no chaining")
+		}
 		return Call{}, p.errorAt(p.pos, "go-db runs one MongoDB call at a time, and there is more here after the first one")
 	}
 	return Call{Collection: collection, Verb: verb, Args: args}, nil

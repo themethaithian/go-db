@@ -123,6 +123,22 @@ func noPreviewFor(engine db.Engine) string {
 	return fmt.Sprintf("go-db does not preview %s statements yet", engineName(engine))
 }
 
+// cannotIntrospect says why the Database tree cannot ask this Engine for
+// something — columns of a Redis key, indexes of a MongoDB collection, tables
+// of an Engine go-db has no adapter for.
+//
+// It is a refusal rather than an empty answer on purpose. An empty list is a
+// real thing a database can report, so answering one here would say "this table
+// has no columns" where the truth is "this is not a thing with columns", and the
+// tree would draw the lie. what is the plural noun that was asked for, so the
+// sentence names the question rather than the caller.
+func cannotIntrospect(engine db.Engine, what string) string {
+	if !engine.Valid() {
+		return fmt.Sprintf("go-db does not know the %q engine this Profile names, so it cannot list its %s.", engine, what)
+	}
+	return fmt.Sprintf("A %s Profile has no %s for go-db to list.", engineName(engine), what)
+}
+
 // engineName is an Engine as a human writes it, for the middle of a sentence.
 func engineName(engine db.Engine) string {
 	switch engine {

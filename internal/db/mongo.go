@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -230,6 +231,10 @@ func (c *mongoConn) ReadQuery(ctx context.Context, statement string) (Result, er
 		return Result{}, fmt.Errorf("db: %w", err)
 	}
 
+	if call.OnDatabase() {
+		return c.databaseRead(ctx, call)
+	}
+
 	switch call.Verb {
 	case "find":
 		return mongoFind(ctx, c.collection(call), call.Args)
@@ -250,6 +255,71 @@ func (c *mongoConn) ReadQuery(ctx context.Context, statement string) (Result, er
 	// operation before this adapter learns to run it, the answer is a refusal
 	// rather than a verb falling through to nothing.
 	return Result{}, fmt.Errorf("db: %s() is classified a read, but go-db does not know how to run it", call.Verb)
+}
+
+// databaseRead runs one database-level read — db.<verb>(...), the form that
+// names no collection — and is reached only through ReadQuery, after the
+// classifier has judged the same statement.
+//
+// It is a closed set of one for the same reason the collection switch is
+// closed: an operation whose shape has not been written down cannot be run
+// correctly, and the database-level surface is where the command runners live.
+// A verb the gate's own database-level list gains before this method learns to
+// run it is refused here rather than falling through to nothing.
+func (c *mongoConn) databaseRead(ctx context.Context, call mongoql.Call) (Result, error) {
+	if call.Verb == "getCollectionNames" {
+		return mongoCollectionNames(ctx, c.database, call.Args)
+	}
+	return Result{}, fmt.Errorf("db: db.%s() is classified a read, but go-db does not know how to run it", call.Verb)
+}
+
+// mongoCollectionNames runs db.getCollectionNames() and answers with the
+// database's collection names.
+//
+// nameOnly is set, and it is the whole of what makes this a catalogue read
+// rather than an inspection of the collections themselves: the server is asked
+// for names and nothing else — no options, no statistics, no index
+// information — which is the operation the Approval Gate proved. The filter is
+// the empty document, every collection, because the grammar gives this call no
+// arguments to narrow it with.
+//
+// The answer is the Documents arm holding one document, {"collections": [...]},
+// which is go-db's own rendering exactly as a count's {"count": N} is: MongoDB
+// replies with a list of names, and the arm carries documents, so the list is
+// given the field it is asked by.
+func mongoCollectionNames(ctx context.Context, database *mongo.Database, args []mongoql.Value) (Result, error) {
+	if len(args) != 0 {
+		return Result{}, errors.New("db: getCollectionNames() takes no arguments — it lists every collection in the database go-db is connected to")
+	}
+
+	names, err := database.ListCollectionNames(ctx, bson.D{}, options.ListCollections().SetNameOnly(true))
+	if err != nil {
+		return Result{}, mongoError(err)
+	}
+	return mongoCollectionNamesDocument(names)
+}
+
+// mongoCollectionNamesDocument renders collection names as the one document a
+// catalogue read answers with: sorted, and cut at MaxRows.
+//
+// Sorting is this package's, not the server's. listCollections promises no
+// order, so without it the same database would answer differently between two
+// refreshes and the cut half would be a different half each time — the same
+// reasoning buildRedisMap states for a RESP3 map.
+func mongoCollectionNamesDocument(names []string) (Result, error) {
+	sorted := append([]string(nil), names...)
+	slices.Sort(sorted)
+
+	truncated := len(sorted) > MaxRows
+	if truncated {
+		sorted = sorted[:MaxRows]
+	}
+
+	rendered, err := renderMongoDocument(bson.D{{Key: "collections", Value: sorted}})
+	if err != nil {
+		return Result{}, err
+	}
+	return DocumentsResult([]json.RawMessage{rendered}, truncated), nil
 }
 
 // Exec runs one approved mutation and reports what MongoDB says it changed.
@@ -274,6 +344,14 @@ func (c *mongoConn) Exec(ctx context.Context, statement string) (int64, error) {
 	call, err := mongoql.Parse(statement)
 	if err != nil {
 		return 0, fmt.Errorf("db: %w", err)
+	}
+
+	// Every operation below works on a collection, and a database-level call
+	// names none. Refusing here rather than in the switch is what keeps that
+	// true: db.insertOne({}) would otherwise reach collection() and be run
+	// against a collection with an empty name.
+	if call.OnDatabase() {
+		return 0, fmt.Errorf("db: db.%s() names no collection, and every MongoDB operation go-db writes with works on one", call.Verb)
 	}
 
 	switch call.Verb {

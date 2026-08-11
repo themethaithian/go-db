@@ -50,6 +50,7 @@ var (
 func TestMain(m *testing.M) {
 	code := m.Run()
 	stopMySQLContainer()
+	stopRedisContainer()
 	os.Exit(code)
 }
 

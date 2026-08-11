@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -78,6 +79,135 @@ func TestMongoReadVerbsAreClassifiedReads(t *testing.T) {
 
 			if verdict := guard.ClassifyMongo(statement); !verdict.IsRead() {
 				t.Errorf("ClassifyMongo(%q) = %s, want the classifier and this adapter to agree on what reads", statement, verdict.Reason)
+			}
+		})
+	}
+}
+
+// The database-level form reaches the same second layer, and the connection it
+// is refused on has no client and no database — so a passing test is evidence
+// nothing left the process. dropDatabase is the one that matters: it is a
+// database-level call the grammar now parses, and the only thing between it and
+// a deleted database on this path is the classifier.
+func TestMongoReadQueryRefusesADatabaseLevelMutation(t *testing.T) {
+	for _, statement := range []string{
+		`db.dropDatabase()`,
+		`db.createCollection("t")`,
+		`db.runCommand({ping: 1})`,
+		`db.adminCommand({listDatabases: 1})`,
+		`db.getSiblingDB("other")`,
+		// A collection verb at the database level names no collection, and is
+		// not a read here whatever it is called one level down.
+		`db.find({})`,
+		`db.somethingNew()`,
+	} {
+		t.Run(statement, func(t *testing.T) {
+			conn := &mongoConn{}
+
+			result, err := conn.ReadQuery(context.Background(), statement)
+			if err == nil {
+				t.Fatalf("ReadQuery(%q) = %v, want it refused", statement, result.Kind())
+			}
+			if !errors.Is(err, ErrWriteAttempt) {
+				t.Errorf("ReadQuery(%q) error = %v, want it to wrap ErrWriteAttempt", statement, err)
+			}
+		})
+	}
+}
+
+// getCollectionNames() takes no arguments. One is not a narrower question but a
+// misunderstanding, and it is refused rather than dropped — the same line
+// estimatedDocumentCount() draws. It is refused before the database is touched,
+// which is what lets this run on a connection that has none.
+func TestMongoCollectionNamesTakesNoArguments(t *testing.T) {
+	conn := &mongoConn{}
+
+	result, err := conn.ReadQuery(context.Background(), `db.getCollectionNames({name: "a"})`)
+	if err == nil {
+		t.Fatalf("ReadQuery with an argument = %v, want it refused", result.Kind())
+	}
+	if errors.Is(err, ErrWriteAttempt) {
+		t.Errorf("error = %v, want a shape refusal rather than the gate's reroute", err)
+	}
+	if !strings.Contains(err.Error(), "no arguments") {
+		t.Errorf("error = %v, want it to say the operation takes none", err)
+	}
+}
+
+// The collection-names document is go-db's own rendering, exactly as a count
+// is: MongoDB answers with a list of names, and the Documents arm carries
+// documents, so the names are given the field they are asked by. The names are
+// sorted, because the server does not promise an order and a tree that reorders
+// itself between two refreshes is a tree nobody can read.
+func TestMongoCollectionNamesDocumentIsGoDBsOwnRendering(t *testing.T) {
+	result, err := mongoCollectionNamesDocument([]string{"orders", "audit", "users"})
+	if err != nil {
+		t.Fatalf("mongoCollectionNamesDocument: %v", err)
+	}
+
+	set, ok := result.Documents()
+	if !ok {
+		t.Fatal("the collection names are not the Documents arm, want every read tagged the one way")
+	}
+	if len(set.Documents) != 1 {
+		t.Fatalf("documents = %d, want the one document the names are rendered as", len(set.Documents))
+	}
+	if got := string(set.Documents[0]); got != `{"collections":["audit","orders","users"]}` {
+		t.Errorf("collections document = %s, want the names sorted under one field", got)
+	}
+	if set.Truncated {
+		t.Error("Truncated = true on three names, want the cut marker only where there was a cut")
+	}
+}
+
+// A database with more collections than the cap is cut at it, and says so —
+// MaxRows means the same thing here as it does for documents and rows.
+func TestMongoCollectionNamesIsCappedAtMaxRows(t *testing.T) {
+	names := make([]string, MaxRows+7)
+	for i := range names {
+		names[i] = fmt.Sprintf("c%05d", i)
+	}
+
+	result, err := mongoCollectionNamesDocument(names)
+	if err != nil {
+		t.Fatalf("mongoCollectionNamesDocument: %v", err)
+	}
+
+	set, _ := result.Documents()
+	if !set.Truncated {
+		t.Error("Truncated = false past the cap, want the answer on screen never mistaken for the whole one")
+	}
+	var document struct {
+		Collections []string `json:"collections"`
+	}
+	if err := json.Unmarshal(set.Documents[0], &document); err != nil {
+		t.Fatalf("reading the rendered document: %v", err)
+	}
+	if len(document.Collections) != MaxRows {
+		t.Errorf("collections = %d, want the first %d", len(document.Collections), MaxRows)
+	}
+	if document.Collections[0] != "c00000" {
+		t.Errorf("the kept names start at %q, want the first ones by name", document.Collections[0])
+	}
+}
+
+// Exec has no database-level form at all, and must say so rather than reach for
+// a collection with no name — which is what c.collection() would build for one.
+func TestMongoExecRefusesADatabaseLevelCall(t *testing.T) {
+	for _, statement := range []string{
+		`db.dropDatabase()`,
+		`db.insertOne({})`,
+		`db.getCollectionNames()`,
+	} {
+		t.Run(statement, func(t *testing.T) {
+			conn := &mongoConn{}
+
+			affected, err := conn.Exec(context.Background(), statement)
+			if err == nil {
+				t.Fatalf("Exec(%q) = %d, want it refused rather than run", statement, affected)
+			}
+			if !strings.Contains(err.Error(), "collection") {
+				t.Errorf("Exec(%q) error = %v, want it to say the call names no collection", statement, err)
 			}
 		})
 	}

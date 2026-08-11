@@ -58,6 +58,7 @@
     ensureIndexes,
     ensureTables,
     findTable,
+    hasStructure,
     tablesOf,
   } from "./schema.svelte";
   import { mentionedTables, type CompletionSchema } from "./completion";
@@ -193,8 +194,14 @@
   // Tables load the moment a Profile is picked, not only once the human
   // expands it in the Database tree — autocomplete needs the table list
   // before there is a table name to complete.
+  //
+  // On MySQL only, and that is about cost rather than capability: the tables
+  // level answers on every Engine now (a Redis Profile's is its keys), but
+  // completing SQL identifiers is what this list is for, and paging a whole
+  // keyspace out of Redis on the off-chance is a read nobody asked for. The
+  // Database tree asks when a human expands one, which is the asking.
   $effect(() => {
-    if (profileName !== null) ensureTables(profileName, database);
+    if (profileName !== null && hasStructure(profileName)) ensureTables(profileName, database);
   });
 
   // The lazy half of column completion: for every table this buffer already
@@ -218,8 +225,14 @@
   // it: that schema is already what "" means, and offering it twice would be
   // two options that do the same thing. A Profile that names no database has
   // no such schema, so the default is the bare connection and says so.
+  //
+  // MySQL only, for a different reason than the table list above: Redis and
+  // MongoDB have exactly one database each and it is the one the Profile is
+  // already connected to, so every entry the picker could offer is the
+  // default it already shows. Offering the same place twice would open a
+  // second connection to it.
   $effect(() => {
-    if (profileName !== null) ensureDatabases(profileName);
+    if (profileName !== null && hasStructure(profileName)) ensureDatabases(profileName);
   });
 
   let home = $derived(profileName === null ? "" : configuredDatabase(profileName));

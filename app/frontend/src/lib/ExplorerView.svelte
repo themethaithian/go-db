@@ -1,6 +1,6 @@
 <script lang="ts">
-  // The Explorer: the Database tool window on the left, and the rows of the
-  // table selected in it on the right.
+  // The Explorer: the Database tool window on the left, and the contents of
+  // whatever is selected in it on the right.
   //
   // This view has one job and no ambiguity about it. There is no SQL to edit
   // here, so the grid cannot drift away from the highlighted table the way it
@@ -15,12 +15,20 @@
   // fetched rows by some private path would be asking to be trusted, and this
   // one would rather be checked.
   //
+  // What "the contents" are is the Engine's to say (ADR-0006), and browse.ts
+  // writes the statement for each: a MySQL table is a SELECT, a MongoDB
+  // collection is a find, and a Redis key takes two reads — TYPE to learn what
+  // it holds, then the one command that reads that type. Both of those go the
+  // same way through RunQuery and are shown by the same panel; the caption
+  // still says exactly what ran, which for a key is the second command.
+  //
   // The controls above the grid — a WHERE condition and a row limit — are
   // edits to that one statement and nothing more. The condition is dropped in
   // verbatim, exactly as typed: it is the human's SQL, and the gate that
   // classifies it (and the READ ONLY transaction behind it) is the same
   // safety story as the Editor's. Sanitising it here would only teach people
-  // that the panel writes queries they did not.
+  // that the panel writes queries they did not. They are MySQL's controls and
+  // are shown for MySQL only: there is no WHERE to put on a GET.
   //
   // Values in these rows can also be typed over, in the record pane, and that
   // is the one thing this panel does that is not a read — but it is not a
@@ -51,13 +59,28 @@
   import {
     browse,
     BROWSE_LIMITS,
+    engineOf,
     ensureColumns,
     ensureIndexes,
     findTable,
+    hasStructure,
     refreshTableStructure,
     selected,
     type TableNode,
   } from "./schema.svelte";
+  import {
+    browseMongoCollection,
+    browseTableSql,
+    MISSING_KEY,
+    MONGODB,
+    MYSQL,
+    noReadForType,
+    REDIS,
+    redisReadCommand,
+    redisTypeCommand,
+    UNNAMEABLE_COLLECTION,
+    UNQUOTABLE_KEY,
+  } from "./browse";
   import { RowEdits } from "./edits.svelte";
   import { editability, qualify } from "./mutate";
   import { CancelPending, RunQuery } from "../../wailsjs/go/app/App";
@@ -87,6 +110,10 @@
   // that produced it, never from the current controls, so the caption is a
   // record rather than a promise.
   let shownSql = $state("");
+  // The Redis key behind what is on screen, for the one thing shownSql cannot
+  // answer for a key: whether a fetch is a re-read of what is already there.
+  // A key's statement is not known until TYPE has been asked.
+  let shownKey = $state<string | null>(null);
 
   // The condition as it is being typed, which is not yet the condition in
   // force: it becomes browse.filter on Enter, and that is what re-runs the
@@ -120,11 +147,30 @@
   // and limit changes take the same numbered path, for the same reason.
   let latestRequest = 0;
 
+  // The Engine of the Profile the selection is on: which statement browses it,
+  // and whether it has a Structure side at all.
+  let engine = $derived(engineOf(selected.profile));
+  let structured = $derived(hasStructure(selected.profile));
+
+  // The statement that browses the selection, for the Engines whose browse is
+  // one statement. A Redis key's is not — its command depends on a TYPE that
+  // has to be asked for first — so this is empty there and fetchRedisKey
+  // builds the real one once it knows. Everything that reads a statement out
+  // of this view (the caption, "Open in editor", the refresh) reads shownSql
+  // instead, which is a record of what actually ran.
   let browseSql = $derived(
-    buildSql(selected.database, selected.table, browse.filter, browse.limit),
+    buildStatement(engine, selected.database, selected.table, browse.filter, browse.limit),
   );
 
-  let rowCount = $derived(result?.status === "ok" ? (result.rows?.length ?? 0) : null);
+  // The row count in the header, for the answers that have rows. A value or a
+  // documents answer has none, and "0 rows" over a Redis string would be a
+  // count of the wrong thing — while a table answer with no rows genuinely is
+  // 0 rows, and its `rows` field is absent from the JSON rather than empty.
+  let rowCount = $derived(
+    result?.status === "ok" && result.value === undefined && result.documents === undefined
+      ? (result.rows?.length ?? 0)
+      : null,
+  );
   let shownColumns = $derived(result?.status === "ok" ? (result.columns ?? []) : []);
   let shownRows = $derived(
     result?.status === "ok" ? ((result.rows ?? []) as (string | null)[][]) : [],
@@ -183,11 +229,16 @@
   // ensureColumns and ensureIndexes are the same no-op-if-cached calls the
   // tree's toggleTable makes, so flipping between Data and Structure, or
   // between tables and back, never re-asks the database.
+  //
+  // Neither is asked off MySQL: a key has no columns and a collection has no
+  // fixed ones, and there is no Structure side for them to fill. Both calls
+  // hold that line themselves too, so this is the early exit rather than the
+  // safeguard.
   $effect(() => {
     const profileName = selected.profile;
     const database = selected.database;
     const node = tableNode;
-    if (profileName === null || database === null || node === null) return;
+    if (!structured || profileName === null || database === null || node === null) return;
     ensureIndexes(profileName, database, node);
     if (mode !== "structure") return;
     ensureColumns(profileName, database, node);
@@ -201,20 +252,46 @@
   // table picked in the tree, a condition applied, a limit chosen, or a
   // Profile disconnecting out from under it — the rows are fetched again for
   // exactly that statement.
+  //
+  // A Redis key is the one selection with no statement yet, so it is keyed on
+  // the key itself and fetchRedisKey works out the rest. Both paths take the
+  // same numbered route, so a slow one cannot land on top of a fast one.
   $effect(() => {
     const profileName = selected.profile;
+    const table = selected.table;
+    const key = engine === REDIS ? table : null;
     const sql = browseSql;
-    if (profileName === null || sql === "") {
-      latestRequest += 1;
-      result = null;
-      failure = null;
-      loading = false;
-      shownSql = "";
-      selectedRows = [];
+
+    if (profileName === null || table === null) {
+      clearPanel(null);
+      return;
+    }
+    if (key !== null) {
+      void fetchRedisKey(profileName, key);
+      return;
+    }
+    if (sql === "") {
+      // Something is selected and this Engine cannot write a statement that
+      // names it — a MongoDB collection whose name is outside the grammar.
+      // Saying so beats a panel that sits on "Loading…" for ever.
+      clearPanel(engine === MONGODB ? UNNAMEABLE_COLLECTION : null);
       return;
     }
     void fetchRows(profileName, sql);
   });
+
+  // Empties the panel, optionally leaving one line in place of the results.
+  // Bumping the request number is what makes it stick: a fetch already in
+  // flight lands on a number that is no longer the latest and drops itself.
+  function clearPanel(reason: string | null) {
+    latestRequest += 1;
+    result = null;
+    failure = reason;
+    loading = false;
+    shownSql = "";
+    shownKey = null;
+    selectedRows = [];
+  }
 
   // The box shows the condition in force: applying one normalises what is
   // typed, and switching tables (which drops the condition) empties the box
@@ -245,6 +322,8 @@
     // on a confirm is a save for rows that are about to be replaced.
     edits.abandon();
     edits.revert();
+    // Whatever is on screen is not a Redis key's value any more.
+    shownKey = null;
     // Rows from the table we were looking at a moment ago are worse than no
     // rows: they would sit under another table's name, or another condition.
     // They go the instant the statement changes — but re-running the same one
@@ -260,13 +339,7 @@
     try {
       // No database: the browse statement is qualified with the schema it
       // reads, and runs on the Profile's own connection as it always has.
-      const next = await RunQuery(profileName, "", sql);
-      // This panel never confirms a write, so a withheld statement's pending
-      // must not linger in the gate's queue (Inline Confirms have no expiry).
-      // Cancelling records the honest outcome: the surface declined to run it.
-      if (next.status === "requires_confirmation" && next.pending_id) {
-        void CancelPending(next.pending_id);
-      }
+      const next = await runRead(profileName, sql);
       if (request !== latestRequest) return;
       result = next;
       failure = null;
@@ -281,29 +354,127 @@
     }
   }
 
-  // The statement, and the only place it is built. The table is qualified
-  // with the database it was picked from — the tree can show two schemas with
-  // a `users` in each, and an unqualified name would read whichever the
-  // connection happens to default to. Empty condition means no WHERE clause at
-  // all, rather than a WHERE that is quietly always true.
-  function buildSql(
+  // Browsing one Redis key, which takes two reads: TYPE to learn what is in
+  // it, and then the one command that reads that type (browse.ts maps them).
+  //
+  // Two reads rather than one guess. Redis has no command that reads a key of
+  // any type, and trying GET first would answer WRONGTYPE for four of the six
+  // — an error where there is data. Both reads go through RunQuery, so both
+  // are classified and both are in the audit log, which is the same bargain
+  // the rest of this panel makes: the reads are visible because they are real.
+  //
+  // The caption ends up showing the second command, which is the one that
+  // produced what is on screen.
+  async function fetchRedisKey(profileName: string, key: string) {
+    const typeCommand = redisTypeCommand(key);
+    if (typeCommand === null) {
+      clearPanel(UNQUOTABLE_KEY);
+      return;
+    }
+
+    const request = (latestRequest += 1);
+    selectedRows = [];
+    edits.abandon();
+    edits.revert();
+    // What is on screen belongs to the key that was selected a moment ago, and
+    // leaving it under another key's name would be worse than showing nothing.
+    // Re-reading the same key keeps it, so refresh does not blink — the same
+    // bargain fetchRows makes with the statement, made with the key because
+    // the statement is not known until TYPE has answered.
+    // (untracked: this runs inside the selection effect, which must not re-fire
+    // on the record it is itself writing.)
+    if (untrack(() => shownKey) !== key) {
+      result = null;
+      failure = null;
+      shownSql = "";
+    }
+    shownKey = key;
+    loading = true;
+    try {
+      const typed = await runRead(profileName, typeCommand);
+      if (request !== latestRequest) return;
+      if (typed.status !== "ok" || typed.value === undefined) {
+        // The gate or the server answered instead of Redis: shown as it came,
+        // the same way a failed SELECT is.
+        result = typed;
+        failure = null;
+        shownSql = typeCommand;
+        return;
+      }
+
+      const type = typed.value.kind === "string" ? (typed.value.text ?? "") : "";
+      if (type === "none" || type === "") {
+        clearPanel(MISSING_KEY);
+        return;
+      }
+      const readCommand = redisReadCommand(key, type);
+      if (readCommand === null) {
+        clearPanel(noReadForType(type));
+        return;
+      }
+
+      const next = await runRead(profileName, readCommand);
+      if (request !== latestRequest) return;
+      result = next;
+      failure = null;
+      shownSql = readCommand;
+    } catch (err) {
+      if (request !== latestRequest) return;
+      result = null;
+      failure = String(err);
+      shownSql = "";
+    } finally {
+      if (request === latestRequest) loading = false;
+    }
+  }
+
+  // One read through the gate, with the one thing this panel always does to a
+  // withheld statement: cancel it. Nothing here confirms a write, and an
+  // Inline Confirm nobody answers has no expiry.
+  async function runRead(profileName: string, statement: string) {
+    const answer = await RunQuery(profileName, "", statement);
+    if (answer.status === "requires_confirmation" && answer.pending_id) {
+      void CancelPending(answer.pending_id);
+    }
+    return answer;
+  }
+
+  // The statement, and the only place it is built. For MySQL the table is
+  // qualified with the database it was picked from — the tree can show two
+  // schemas with a `users` in each, and an unqualified name would read
+  // whichever the connection happens to default to. Empty condition means no
+  // WHERE clause at all, rather than a WHERE that is quietly always true.
+  //
+  // MongoDB takes neither: its grammar has one call per statement and the
+  // adapter caps what comes back, so there is no condition or limit to apply.
+  // Redis is empty here on purpose — see browseSql.
+  function buildStatement(
+    engineName: string,
     database: string | null,
     table: string | null,
     filter: string,
     limit: number,
   ): string {
-    if (database === null || table === null) return "";
-    const condition = filter.trim();
-    const where = condition === "" ? "" : ` WHERE ${condition}`;
-    return `SELECT * FROM ${qualify(database, table)}${where} LIMIT ${limit}`;
+    if (table === null) return "";
+    if (engineName === MONGODB) return browseMongoCollection(table) ?? "";
+    if (engineName !== MYSQL) return "";
+    if (database === null) return "";
+    return browseTableSql(database, table, filter, limit, qualify);
   }
 
   function refresh() {
     if (selected.profile === null) return;
-    if (mode === "structure") {
+    if (mode === "structure" && structured) {
       if (tableNode !== null && selected.database !== null) {
         refreshTableStructure(selected.profile, selected.database, tableNode);
       }
+      return;
+    }
+    // A key is refreshed from the top, TYPE included: what a key holds can
+    // change between two looks at it, and re-running only the second command
+    // would answer WRONGTYPE where the honest answer is the new value.
+    if (engine === REDIS) {
+      if (selected.table !== null) void fetchRedisKey(selected.profile, selected.table);
       return;
     }
     if (browseSql === "") return;
@@ -379,9 +550,14 @@
     selectedRows = [clamp(from + step, 0, shownRows.length - 1)];
   }
 
+  // The statement the Editor is handed is the one that ran, falling back to
+  // the one that would: a Redis key has no statement until TYPE has answered,
+  // and taking what is on screen to the Editor is the point of the button.
+  let editorStatement = $derived(browseSql !== "" ? browseSql : shownSql);
+
   function openInEditor() {
-    if (selected.profile === null || browseSql === "") return;
-    onOpenInEditor(selected.profile, browseSql);
+    if (selected.profile === null || editorStatement === "") return;
+    onOpenInEditor(selected.profile, editorStatement);
   }
 
   // Sends the dirty rows to the gate, one UPDATE and one Inline Confirm at a
@@ -431,12 +607,14 @@
         <span class="text-base text-text-muted">No table selected</span>
       {:else}
         <!-- The name as the statement writes it: the database dimmed, the
-             table it qualifies in full — two schemas can each have a `users`. -->
+             table it qualifies in full — two schemas can each have a `users`.
+             A Redis key is shown alone, because the index it is in is not part
+             of any command that names it. -->
         <span
           class="truncate font-mono text-md font-medium text-text"
-          title="{selected.database}.{selected.table}"
+          title={engine === REDIS ? selected.table : `${selected.database}.${selected.table}`}
         >
-          <span class="text-text-subtle">{selected.database}.</span>{selected.table}
+          {#if engine !== REDIS}<span class="text-text-subtle">{selected.database}.</span>{/if}{selected.table}
         </span>
         <span
           class="shrink-0 rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
@@ -458,7 +636,10 @@
 
         <!-- The Data | Structure toggle, in the app's own pill/tab language
              (App.svelte's nav bar): a bordered strip, the active side filled
-             with the accent, the other muted until hovered. -->
+             with the accent, the other muted until hovered.
+             Structure is MySQL's: a key has no columns and no indexes, so the
+             toggle is absent rather than present and empty. -->
+        {#if structured}
         <div
           class="flex h-8 shrink-0 items-center gap-0.5 rounded-control border border-border bg-surface p-0.5 text-sm"
           role="group"
@@ -485,6 +666,7 @@
             Structure
           </button>
         </div>
+        {/if}
 
         <button
           type="button"
@@ -548,7 +730,10 @@
       <section
         class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel border border-border bg-surface-panel shadow-panel"
       >
-        {#if selected.table !== null && mode === "data"}
+        <!-- WHERE and LIMIT are edits to a SELECT, so they are shown where
+             there is one. A find and a GET take neither: the adapter caps
+             what a find returns, and a key is one key. -->
+        {#if selected.table !== null && mode === "data" && engine === MYSQL}
           <div class="flex h-11 shrink-0 items-center gap-3 border-b border-border px-3">
             <div
               class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-control border border-border bg-surface px-2.5 transition-colors focus-within:border-accent hover:border-border-strong"
@@ -629,7 +814,7 @@
         {/if}
 
         <div class="flex h-8 shrink-0 items-center justify-between gap-3 border-b border-border px-3">
-          {#if mode === "structure"}
+          {#if mode === "structure" && structured}
             <span class="text-xs font-medium tracking-wide text-text-subtle uppercase">Structure</span>
           {:else if shownSql === ""}
             <span class="text-xs font-medium tracking-wide text-text-subtle uppercase">Data</span>
@@ -648,7 +833,7 @@
           {/if}
         </div>
 
-        {#if mode === "structure" && selected.table !== null}
+        {#if mode === "structure" && structured && selected.table !== null}
           <StructureView node={tableNode} />
         {:else if selected.table === null}
           <div class="m-auto flex max-w-xs flex-col items-center gap-2 px-6 py-8 text-center">
@@ -694,7 +879,9 @@
           </div>
         {:else if result === null}
           <div class="m-auto px-6 py-8 text-center">
-            <p class="text-base text-text-muted">Loading rows…</p>
+            <p class="text-base text-text-muted">
+              {engine === MYSQL ? "Loading rows…" : "Loading…"}
+            </p>
           </div>
         {:else if result.status === "ok" && result.documents !== undefined}
           <!-- The Documents arm (ADR-0006). Same posture as the Value arm

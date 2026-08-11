@@ -32,6 +32,8 @@
   import { isPinned, pinnedAmong, togglePin } from "./pins.svelte";
   import {
     databaseNode,
+    engineOf,
+    introspectable,
     isSystemDatabase,
     profileNode,
     refreshAll,
@@ -44,6 +46,13 @@
     type DatabaseNode,
     type TableNode,
   } from "./schema.svelte";
+
+  // The label an Engine's own name reads as in prose — used only by the
+  // placeholder below, for the one Engine that can reach this tree without
+  // being introspectable (ADR-0006: Mongo has no picker option yet either).
+  function engineLabel(engine: string): string {
+    return engine === "redis" ? "Redis" : engine;
+  }
 
   let {
     connectedProfiles,
@@ -622,7 +631,11 @@
         </div>
 
         {#if node.expanded}
-          {#if node.error !== null}
+          {#if !introspectable(profileName)}
+            <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">
+              Schema browsing for {engineLabel(engineOf(profileName))} arrives later.
+            </p>
+          {:else if node.error !== null}
             <p class="py-1 pr-3 pl-8 text-sm text-danger">{node.error}</p>
           {:else if node.databases !== null && node.databases.length === 0}
             <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">No databases on this server.</p>

@@ -22,6 +22,7 @@
   import { onMount, untrack } from "svelte";
   import SqlEditor from "./SqlEditor.svelte";
   import ResultsTable from "./ResultsTable.svelte";
+  import ValueView from "./ValueView.svelte";
   import RecordPaneDock from "./RecordPaneDock.svelte";
   import InlineConfirm from "./InlineConfirm.svelte";
   import SaveBar from "./SaveBar.svelte";
@@ -694,7 +695,8 @@
         Database
         <select
           class="h-8 max-w-52 rounded-control border border-border bg-surface-raised px-2 text-base font-normal text-text transition-colors hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={profileName === null}
+          disabled={profileName === null || engine !== "mysql"}
+          title={engine !== "mysql" ? "Schema browsing is not available for this Engine yet." : undefined}
           value={selectedDatabase}
           onchange={(event) => writeDatabase(event.currentTarget.value)}
         >
@@ -967,6 +969,7 @@
             value={sql}
             {highlight}
             {completionSchema}
+            {engine}
             onChange={handleSqlChange}
             onCursorChange={handleCursorChange}
             onRun={run}
@@ -1042,6 +1045,11 @@
                 Write a query above and press ⌘⏎ — or browse a table in the Explorer.
               </p>
             </div>
+          {:else if result.status === "ok" && result.value !== undefined}
+            <!-- The Value arm (ADR-0006): one Redis reply tree in place of the
+                 grid. No RecordPaneDock here — picking rows is a table's own
+                 gesture, and a single typed value has nothing to pick. -->
+            <ValueView value={result.value} message={result.message} />
           {:else if result.status === "ok"}
             <div class="flex min-h-0 min-w-0 flex-1" bind:clientWidth={resultsWidth}>
               <div class="flex min-w-0 flex-1">

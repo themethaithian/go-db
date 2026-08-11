@@ -8,7 +8,7 @@
   // listening, and knows nothing about why: statements, the Approval Gate and
   // what "active" means are EditorView's business.
   import { onMount, onDestroy } from "svelte";
-  import { EditorState, StateEffect, StateField } from "@codemirror/state";
+  import { Compartment, EditorState, StateEffect, StateField } from "@codemirror/state";
   import {
     Decoration,
     EditorView,
@@ -30,6 +30,7 @@
     value,
     highlight = null,
     completionSchema = null,
+    engine = "mysql",
     onChange,
     onCursorChange,
     onRun,
@@ -45,6 +46,13 @@
         hand over a new object each render without this component having to
         notice or reconfigure anything. */
     completionSchema?: CompletionSchema | null;
+    /** The selected Profile's Engine (ADR-0006). MySQL's own SQL machinery —
+        syntax highlighting, keyword and schema completion — only means
+        something for a "mysql" Profile; anything else falls back to plain
+        text rather than colouring or completing a statement language this
+        editor does not know. There is no Redis highlighting to add in its
+        place (CLAUDE.md v1 scope) — plain text is the deliberate answer. */
+    engine?: string;
     onChange: (value: string) => void;
     /** Where the caret is, and whatever is selected under it ("" when nothing is). */
     onCursorChange: (cursor: number, selection: string) => void;
@@ -171,6 +179,22 @@
     override: [keywordCompletion, schemaCompletion(() => completionSchema)],
   });
 
+  // The two extensions that are MySQL-shaped rather than editor-shaped: the
+  // SQL parser (which is what syntaxHighlighting below actually has anything
+  // to colour) and MySQL's own keyword/schema completion. Held in
+  // Compartments so a Profile switch can turn them on or off — plain text
+  // for a non-mysql Engine — without tearing down and rebuilding the whole
+  // CodeMirror instance, which would drop undo history and the caret.
+  const languageCompartment = new Compartment();
+  const completionCompartment = new Compartment();
+
+  function languageExtension(forEngine: string) {
+    return forEngine === "mysql" ? sql({ dialect: MySQL }) : [];
+  }
+  function completionExtension(forEngine: string) {
+    return forEngine === "mysql" ? completion : [];
+  }
+
   // Syntax colors, also from the tokens: keywords, strings, numbers and
   // comments are the only distinctions SQL actually needs to scan quickly.
   const syntax = HighlightStyle.define([
@@ -215,11 +239,11 @@
           highlightActiveLineGutter(),
           drawSelection(),
           history(),
-          sql({ dialect: MySQL }),
+          languageCompartment.of(languageExtension(engine)),
           syntaxHighlighting(syntax),
           highlightField,
           theme,
-          completion,
+          completionCompartment.of(completionExtension(engine)),
           keymap.of([
             { key: "Mod-Enter", run: () => (onRun(), true) },
             { key: "Shift-Alt-f", run: () => (onFormat?.(), true) },
@@ -252,6 +276,21 @@
     const next = value;
     if (view === undefined || view.state.doc.toString() === next) return;
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: next } });
+  });
+
+  // Reconfigures the two MySQL-shaped compartments when the selected
+  // Profile's Engine changes — a Profile switch inside the same tab, not a
+  // remount, so this is the only place that turns SQL highlighting and
+  // completion on or off after the editor already exists.
+  $effect(() => {
+    const forEngine = engine;
+    if (view === undefined) return;
+    view.dispatch({
+      effects: [
+        languageCompartment.reconfigure(languageExtension(forEngine)),
+        completionCompartment.reconfigure(completionExtension(forEngine)),
+      ],
+    });
   });
 
   // Paints the range the caller asked for. Offsets are clamped to the document

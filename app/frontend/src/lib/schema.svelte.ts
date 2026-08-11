@@ -297,6 +297,18 @@ export function engineOf(profileName: string | null): string {
   return engines[profileName] ?? MYSQL;
 }
 
+/**
+ * Whether profileName's Engine can be asked to introspect its own schema —
+ * only MySQL can today (ADR-0006). Redis and MongoDB have no databases,
+ * tables or columns to list, so nothing here may fire ListDatabases,
+ * ListTables, ListColumns or ListIndexes for one: the Database tree and the
+ * Editor's database picker both read this before asking, in place of
+ * finding out from a failed call.
+ */
+export function introspectable(profileName: string | null): boolean {
+  return engineOf(profileName) === MYSQL;
+}
+
 /** Expands or collapses a database, loading its tables the first time. */
 export function toggleDatabase(profileName: string, database: string) {
   const node = ensureDatabase(profileName, database);
@@ -439,6 +451,11 @@ function reloadConfigured(): Promise<void> {
 
 async function loadDatabases(profileName: string) {
   const node = ensureProfile(profileName);
+  // A Profile whose Engine cannot be introspected has no ListDatabases to
+  // call — leaving node.databases null is what tells the tree and the
+  // Editor's picker to show their own placeholder instead of an error a
+  // non-SQL server was never going to answer.
+  if (!introspectable(profileName)) return;
   node.loading = true;
   node.error = null;
   try {
@@ -479,6 +496,10 @@ async function loadTables(
   reExpand: Set<string> = new Set(),
 ) {
   const node = ensureDatabase(profileName, database);
+  // Same posture as loadDatabases: a non-introspectable Engine has no
+  // ListTables to call, including the Editor's autocomplete path, which
+  // asks for a tab's tables directly rather than through the tree.
+  if (!introspectable(profileName)) return;
   node.loading = true;
   node.error = null;
   try {

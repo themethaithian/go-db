@@ -44,6 +44,24 @@
   let password = $state("");
   let confirmingDelete = $state(false);
 
+  // The Profile's Engine (ADR-0006), and each Engine's own default port.
+  // MongoDB is not offered here yet: it has no classifier of its own, so a
+  // Profile saved with that Engine could only ever be refused at the
+  // Approval Gate — it arrives once MongoDB gets its own ADR-0006 tasks
+  // (classifier, driver, editor grammar), not before.
+  let engine = $state("mysql");
+  const ENGINE_DEFAULT_PORT: Record<string, number> = { mysql: 3306, redis: 6379 };
+
+  // Changing the Engine moves the port to its new default, but only when the
+  // port on screen is still the previous Engine's own default — a port the
+  // human typed themselves is theirs to keep.
+  function handleEngineChange(next: string) {
+    if (port === (ENGINE_DEFAULT_PORT[engine] ?? 3306)) {
+      port = ENGINE_DEFAULT_PORT[next] ?? 3306;
+    }
+    engine = next;
+  }
+
   // SSH tunnel section. sshPortInput is kept as a plain string (not a bound
   // number) so an emptied field reads back as "" rather than NaN; it is
   // parsed on submit, with empty treated as 0 so the backend's own default
@@ -144,6 +162,11 @@
     user = profile?.User ?? "";
     database = profile?.Database ?? "";
     password = "";
+    // An unset Engine is the backend's own signal for "mysql" (its Profile
+    // store normalizes it that way) — read the same way schema.svelte.ts
+    // reads it, so a Profile saved before Engine existed still shows MySQL
+    // here rather than a blank select.
+    engine = profile?.Engine || "mysql";
     confirmingDelete = false;
     mcpPopoverOpen = false;
 
@@ -169,6 +192,7 @@
       Port: port,
       User: user,
       Database: database,
+      Engine: engine,
       SSH: sshEnabled
         ? new db.SSHTunnel({
             Host: sshHost,
@@ -288,7 +312,7 @@
     {/if}
 
     <div class="grid grid-cols-4 gap-x-3 gap-y-4">
-      <label class="{labelClass} col-span-4">
+      <label class="{labelClass} col-span-3">
         <span class="flex items-center justify-between">
           <span>Name</span>
           {#if isEditing}
@@ -296,6 +320,22 @@
           {/if}
         </span>
         <input class="{fieldClass} {lockedFieldClass}" bind:value={name} disabled={isEditing} required />
+      </label>
+
+      <label class="{labelClass} col-span-1">
+        Engine
+        <select
+          class={fieldClass}
+          value={engine}
+          onchange={(e) => handleEngineChange(e.currentTarget.value)}
+        >
+          <option value="mysql">MySQL</option>
+          <option value="redis">Redis</option>
+          <!-- MongoDB is deliberately absent: it has no classifier yet
+               (ADR-0006), so a Profile saved with that Engine could only
+               ever be refused at the Approval Gate. It joins this list once
+               MongoDB gets its own ADR-0006 tasks. -->
+        </select>
       </label>
 
       <label class="{labelClass} col-span-3">

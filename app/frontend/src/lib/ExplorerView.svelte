@@ -33,6 +33,7 @@
   import InlineConfirm from "./InlineConfirm.svelte";
   import RecordPaneDock from "./RecordPaneDock.svelte";
   import ResultsTable from "./ResultsTable.svelte";
+  import ValueView from "./ValueView.svelte";
   import SaveBar from "./SaveBar.svelte";
   import Splitter from "./Splitter.svelte";
   import {
@@ -694,6 +695,13 @@
           <div class="m-auto px-6 py-8 text-center">
             <p class="text-base text-text-muted">Loading rows…</p>
           </div>
+        {:else if result.status === "ok" && result.value !== undefined}
+          <!-- The Value arm (ADR-0006). In practice the Explorer never builds
+               a statement that returns one — browsing always runs a SELECT —
+               but rendering it here keeps this panel honest with EditorView's
+               rather than assuming Table is the only kind RunQuery can hand
+               back. -->
+          <ValueView value={result.value} message={result.message} />
         {:else if result.status === "ok"}
           <div class="flex min-h-0 min-w-0 flex-1" bind:clientWidth={bodyWidth}>
             <div class="flex min-w-0 flex-1">

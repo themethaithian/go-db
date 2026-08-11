@@ -24,6 +24,7 @@
 
 import type { db } from "../../wailsjs/go/models";
 import { isPlainCollection, quoteRedisArgument, UNNAMEABLE_COLLECTION, UNQUOTABLE_KEY } from "./browse";
+import { dottedPath, patchedAt, prunedAt, valueAt, type FieldPath } from "./jsonFields";
 
 // ---------------------------------------------------------------------------
 // Redis
@@ -396,6 +397,113 @@ export function replaceOneCommand(collection: string, id: unknown, document: unk
 /** The call that deletes one document, matched on the _id it came with. */
 export function deleteOneCommand(collection: string, id: unknown): string {
   return `db.${plainly(collection)}.deleteOne(${filter(id)})`;
+}
+
+/**
+ * Why _id itself is not editable. Every write built here addresses the
+ * document by it, so typing over it is not an edit to a field but a request
+ * for a different document to exist.
+ */
+export const ID_NOT_EDITABLE =
+  "_id is the address every write here uses, so it cannot be typed over — a document with a different _id is a different document. Delete this one and insert the new one.";
+
+/**
+ * What the human is told when the field they are editing has a name MongoDB's
+ * dotted language cannot write, so the edit goes the long way round.
+ *
+ * It is a caveat rather than a refusal: the edit still happens, and it still
+ * shows in the Inline Confirm before it does — as a whole-document replaceOne
+ * rather than as one $set, which is a bigger statement than the change and is
+ * worth saying so before it is confirmed.
+ */
+export const WHOLE_DOCUMENT_FALLBACK =
+  "this field's name can't be addressed (it holds a dot, or starts with $), so the whole document will be replaced instead of this one field";
+
+/**
+ * What the human is told before removing an array element: the statement is a
+ * $set of the array, not an $unset of the element. See removeFieldCommand.
+ */
+export const ARRAY_ELEMENT_REWRITE =
+  "removing an array element is not an $unset — that would leave a null behind — so this writes the array back without it";
+
+/** Why an element cannot be removed from something that is not an array. */
+const NOT_AN_ARRAY =
+  "go-db read this path as an array element, and what is there is not an array — re-read the collection and try again.";
+
+/**
+ * The call that writes one field of one document.
+ *
+ * The statement the human confirms says exactly what changes:
+ *
+ *   db.<collection>.updateOne({"_id": <id>}, {"$set": {"<dotted.path>": <value>}})
+ *
+ * — which is the whole argument for building it here rather than sending a
+ * patched document. A replaceOne carrying five hundred unchanged fields and
+ * one changed one is a statement nobody can check by reading it, and checking
+ * it by reading it is what the Approval Gate is for.
+ *
+ * A path MongoDB cannot name (see dottedPath) falls back to exactly that
+ * replaceOne, patched here rather than on the server. That is the honest
+ * ending for a field called "a.b": there is no $set that means it, and
+ * refusing the edit outright would be refusing to edit data the browse was
+ * happy to show. The caller says which of the two is about to happen —
+ * WHOLE_DOCUMENT_FALLBACK — before the confirm, not after.
+ */
+export function writeFieldCommand(
+  collection: string,
+  id: unknown,
+  document: unknown,
+  path: FieldPath,
+  value: unknown,
+): string {
+  const dotted = dottedPath(path);
+  if (dotted === null) {
+    return replaceOneCommand(collection, id, patchedAt(document, path, value));
+  }
+  return `db.${plainly(collection)}.updateOne(${filter(id)}, {"$set": {${json(dotted)}: ${json(value)}}})`;
+}
+
+/**
+ * The call that removes one field — or one array element — from one document.
+ *
+ * Three endings, and which one it is, is the path's own shape:
+ *
+ *   - An object key with a name MongoDB can write becomes
+ *     {"$unset": {"<dotted.path>": 1}}, the operation that removes a field.
+ *
+ *   - An array element never becomes $unset. $unset on an array position sets
+ *     it to null rather than removing it, which is the one outcome a human
+ *     pressing delete beside an element does not mean. It becomes a $set of
+ *     the element's own array, patched — one statement, and one whose text
+ *     says exactly what the array will hold afterwards.
+ *
+ *   - Anything whose path cannot be written falls back to the patched
+ *     replaceOne, as writeFieldCommand's does and for the same reason.
+ */
+export function removeFieldCommand(
+  collection: string,
+  id: unknown,
+  document: unknown,
+  path: FieldPath,
+): string {
+  const last = path[path.length - 1];
+  if (typeof last === "number") {
+    const arrayPath = path.slice(0, -1);
+    const array = valueAt(document, arrayPath);
+    if (!Array.isArray(array)) throw new Error(NOT_AN_ARRAY);
+    const remaining = array.filter((_, at) => at !== last);
+    // A document's root is an object, so an array at the empty path is not a
+    // shape this can reach — but a $set with no field name would be a call
+    // that means nothing, so it is refused rather than written.
+    if (arrayPath.length === 0) throw new Error(NOT_AN_ARRAY);
+    return writeFieldCommand(collection, id, document, arrayPath, remaining);
+  }
+
+  const dotted = dottedPath(path);
+  if (dotted === null) {
+    return replaceOneCommand(collection, id, prunedAt(document, path));
+  }
+  return `db.${plainly(collection)}.updateOne(${filter(id)}, {"$unset": {${json(dotted)}: 1}})`;
 }
 
 function filter(id: unknown): string {

@@ -3,9 +3,14 @@
   // the results pane, in place of ResultsTable's grid. Holds no knowledge of
   // how the query ran, the same contract ResultsTable keeps.
   //
-  // A scalar reply (string, integer, double, boolean, nil, error) is shown as
-  // one prominent centred line, the same treatment ResultsTable gives its own
-  // "0 rows" empty state. An array or map hands off to ReplyValue for the
+  // A scalar reply (string, integer, double, boolean) is shown as one
+  // left-aligned row in the results' own visual language — mono, at
+  // ResultsTable's size, wrapping when it is long — rather than as a large
+  // centred line. Centring is the empty state's treatment ("0 rows", "(nil)"),
+  // and borrowing it for a value that is *there* made a two-character answer
+  // look like an announcement and a long one look like a wall. The two
+  // treatments that stay centred are the two that are genuinely absences or
+  // failures: nil and error. An array or map hands off to ReplyValue for the
   // index/key + value list.
   //
   // `message` is the backend's own summary line ("1 value: a list of 2
@@ -39,6 +44,7 @@
   import RawJsonToggle from "./RawJsonToggle.svelte";
   import { parseJsonReply, JSON_REPLY_THRESHOLD } from "./jsonReply";
   import { browsedElements, type Slot } from "./mutateValue";
+  import { patchedAt, prunedAt, type JsonEditing } from "./jsonFields";
   import type { ValueEdits } from "./valueEdits.svelte";
   import type { db } from "../../wailsjs/go/models";
 
@@ -118,6 +124,33 @@
     node.select();
   }
 
+  // Per-field editing on the JSON side of the toggle.
+  //
+  // A Redis key holding JSON holds one string, and Redis has no command that
+  // writes part of one (RedisJSON's JSON.SET does, and this app does not
+  // assume the module is loaded). So a field edit here patches the parsed
+  // value and writes the whole string back through the same SET the Edit
+  // button builds — one statement, and one whose Inline Confirm shows the
+  // string that will be stored. The caveat says so before it is confirmed, in
+  // the pencil's own title, rather than leaving the human to notice it in the
+  // preview.
+  //
+  // Everything else is the tree's: the box, the draft, the literal parsing
+  // and the reading hint are JsonTree's and are shared with the Documents arm
+  // exactly as they stand.
+  let jsonEditing = $derived.by((): JsonEditing | null => {
+    const parsed = jsonValue;
+    if (!stringWritable || edits === null || parsed === undefined) return null;
+    return {
+      edits,
+      scope: "json",
+      onSet: (path, next) => onWrite?.(VALUE_SLOT, JSON.stringify(patchedAt(parsed, path, next))),
+      onRemove: (path) => onWrite?.(VALUE_SLOT, JSON.stringify(prunedAt(parsed, path))),
+      caveat: () =>
+        "this key holds one JSON string, and Redis writes a string whole, so the SET carries the whole value",
+    };
+  });
+
   function scalarText(node: db.Reply): string {
     switch (node.kind) {
       case "string":
@@ -157,6 +190,25 @@
     </svg>
     Edit
   </button>
+{/snippet}
+
+{#snippet scalarRow(withEdit: boolean)}
+  <!-- One value, read left to right at the size everything else in the
+       results pane is read at. It wraps rather than scrolls: a Redis string
+       is arbitrary text, and a value that ran off the right edge would need
+       a horizontal scrollbar to read a sentence. The Edit affordance sits
+       beside it — on the toggle's own bar when there is one, so it is not
+       offered twice. -->
+  <div class="flex items-start gap-2 px-3 py-2">
+    <span
+      class="min-w-0 flex-1 font-mono text-base leading-5 tabular-nums whitespace-pre-wrap break-all text-text select-text"
+    >
+      {scalarText(value)}
+    </span>
+    {#if withEdit && stringWritable}
+      <div class="shrink-0">{@render editButton()}</div>
+    {/if}
+  </div>
 {/snippet}
 
 <div class="flex min-h-0 flex-1 flex-col">
@@ -199,39 +251,33 @@
     </div>
   {:else if showJsonToggle}
     <div class="flex min-h-0 flex-1 flex-col">
-      <div class="flex shrink-0 items-center justify-center gap-2 border-b border-border/60 px-3 py-2">
+      <div class="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2">
         <RawJsonToggle bind:mode />
         {#if stringWritable}{@render editButton()}{/if}
       </div>
       {#if mode === "json"}
         <div class="min-h-0 flex-1 overflow-auto">
-          <JsonTree value={jsonValue} />
+          <JsonTree value={jsonValue} edit={jsonEditing} />
         </div>
       {:else}
-        <div class="m-auto flex flex-col items-center gap-1 px-6 py-8 text-center">
-          <p class="max-w-full font-mono text-lg font-medium break-all text-text tabular-nums">
-            {scalarText(value)}
-          </p>
-        </div>
+        <div class="min-h-0 flex-1 overflow-auto">{@render scalarRow(false)}</div>
       {/if}
+    </div>
+  {:else if value.kind === "nil"}
+    <!-- An absence, and centring is what this app says absence with. -->
+    <div class="m-auto px-6 py-8 text-center">
+      <p class="font-mono text-lg text-text-subtle italic">(nil)</p>
+    </div>
+  {:else if value.kind === "error"}
+    <div class="m-auto px-6 py-8 text-center">
+      <p
+        class="rounded-control border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-base text-danger"
+      >
+        {scalarText(value)}
+      </p>
     </div>
   {:else if isScalar}
-    <div class="m-auto flex flex-col items-center gap-2 px-6 py-8 text-center">
-      {#if value.kind === "nil"}
-        <p class="font-mono text-lg text-text-subtle italic">(nil)</p>
-      {:else if value.kind === "error"}
-        <p
-          class="rounded-control border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-base text-danger"
-        >
-          {scalarText(value)}
-        </p>
-      {:else}
-        <p class="max-w-full font-mono text-lg font-medium break-all text-text tabular-nums">
-          {scalarText(value)}
-        </p>
-      {/if}
-      {#if stringWritable}{@render editButton()}{/if}
-    </div>
+    <div class="min-h-0 flex-1 overflow-auto">{@render scalarRow(true)}</div>
   {:else if elements !== null && edits !== null && onWrite !== null && onRemove !== null}
     <div class="min-h-0 flex-1 overflow-auto">
       <ReplyEditor {elements} {edits} {onWrite} {onRemove} />

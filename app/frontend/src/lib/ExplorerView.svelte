@@ -104,10 +104,13 @@
     deleteKeyCommand,
     deleteOneCommand,
     removeCommand,
+    removeFieldCommand,
     replaceOneCommand,
     writeCommand,
+    writeFieldCommand,
     type Slot,
   } from "./mutateValue";
+  import type { FieldPath } from "./jsonFields";
   import { CancelPending, RunQuery } from "../../wailsjs/go/app/App";
   import type { service } from "../../wailsjs/go/models";
 
@@ -712,6 +715,23 @@
     void runWrite(() => deleteOneCommand(collection, id));
   }
 
+  // The per-field affordances, the same route with a smaller statement: an
+  // updateOne naming exactly the field that changes, so the human confirming
+  // it reads the change rather than the document around it. The document goes
+  // along because the statement is not always a $set — see writeFieldCommand
+  // for the two paths that cannot be named, and what is written instead.
+  function setDocumentField(id: unknown, document: unknown, path: FieldPath, value: unknown) {
+    const collection = selected.table;
+    if (collection === null) return;
+    void runWrite(() => writeFieldCommand(collection, id, document, path, value));
+  }
+
+  function removeDocumentField(id: unknown, document: unknown, path: FieldPath) {
+    const collection = selected.table;
+    if (collection === null) return;
+    void runWrite(() => removeFieldCommand(collection, id, document, path));
+  }
+
   // Whether the pane is showing a browsed Redis key's value — which is the one
   // thing "Delete key" can honestly mean. A value the gate or the server
   // answered with instead is not a key's contents.
@@ -1066,6 +1086,8 @@
             collection={selected.table}
             onReplace={replaceDocument}
             onDelete={deleteDocument}
+            onSetField={setDocumentField}
+            onRemoveField={removeDocumentField}
           />
         {:else if result.status === "ok" && result.value !== undefined}
           <!-- The Value arm (ADR-0006) — what browsing a Redis key answers

@@ -26,25 +26,60 @@
   // "readable JSON" means one thing across both Engines.
   //
   // Editing is the Explorer's alone, and only for a collection it browsed.
-  // Given `edits`, a `collection` and the two callbacks, each card grows Edit
-  // and Delete: Edit swaps the tree for a plain textarea holding the document
-  // pretty-printed, and Save parses it here before anything is sent — invalid
-  // JSON never becomes a call. What is edited is the relaxed extended JSON the
-  // backend emitted ({"$oid": "…"} and friends), and it re-enters through
-  // mongoql's grammar as the plain JSON it is. Given none of them — the
+  // Given `edits`, a `collection` and the callbacks, a card is editable two
+  // ways, and the first of them is the one people reach for:
+  //
+  //   - Per field, in the tree itself. Hover a value, press the pencil, type,
+  //     press Enter — one field, one statement, and the statement the human
+  //     confirms names exactly that field:
+  //     updateOne({"_id": …}, {"$set": {"a.b": …}}). Nothing swaps to raw to
+  //     change one value. JsonTree draws it; mutateValue.ts writes it; the
+  //     path rules and the fallbacks live in jsonFields.ts.
+  //
+  //   - Whole document, as before: Edit swaps the tree for a textarea holding
+  //     the document pretty-printed, and Save parses it here before anything
+  //     is sent — invalid JSON never becomes a call. It is still the right
+  //     affordance for a restructuring, and it is the honest one for a field
+  //     whose name MongoDB's dotted language cannot address.
+  //
+  // What is edited either way is the relaxed extended JSON the backend
+  // emitted ({"$oid": "…"} and friends), and it re-enters through mongoql's
+  // grammar as the plain JSON it is. Given none of the edit props — the
   // Editor — the cards are exactly as read-only as they were before, because
   // an edit needs the collection a document came from and only the Explorer's
   // selection knows it (see EditorView's own note).
   //
-  // A document with no _id is not editable: every call built here addresses
-  // one document by its own _id, and there is no honest filter without one.
+  // A document with no _id is not editable at all, by either route: every
+  // call built here addresses one document by its own _id, and there is no
+  // honest filter without one. _id itself is not editable either, for the
+  // neighbouring reason — it is the address, not a field (ID_NOT_EDITABLE).
+  //
+  // The card chrome is deliberately light. The index sits small in the
+  // corner, the document's own _id is surfaced compactly on the header line
+  // so a stack of cards is scannable without opening any of them, and the
+  // body starts with the fields rather than with a brace — which is why
+  // JsonTree is asked for its `bare` rendering here.
   //
   // `message` is the backend's own summary line ("3 documents.", "1
   // document.") — shown in the footer, the same position and style
   // ValueView's own footer occupies. The truncated pill beside it is
   // ResultsTable's own notice, unchanged.
+  import CopyJson from "./CopyJson.svelte";
   import JsonTree from "./JsonTree.svelte";
-  import { documentId, DOCUMENT_WITHOUT_ID } from "./mutateValue";
+  import {
+    ARRAY_ELEMENT_REWRITE,
+    documentId,
+    DOCUMENT_WITHOUT_ID,
+    ID_NOT_EDITABLE,
+    WHOLE_DOCUMENT_FALLBACK,
+  } from "./mutateValue";
+  import {
+    dottedPath,
+    isFieldBox,
+    recogniseExtended,
+    type FieldPath,
+    type JsonEditing,
+  } from "./jsonFields";
   import type { ValueEdits } from "./valueEdits.svelte";
 
   type Documents = { documents: unknown[]; truncated: boolean };
@@ -56,6 +91,8 @@
     collection = null,
     onReplace = null,
     onDelete = null,
+    onSetField = null,
+    onRemoveField = null,
   }: {
     documents: Documents;
     message: string;
@@ -67,13 +104,29 @@
     onReplace?: ((id: unknown, document: unknown) => void) | null;
     /** Deletes one document by the _id it came with. */
     onDelete?: ((id: unknown) => void) | null;
+    /**
+     * Writes one field of one document. The document goes with it because the
+     * statement is not always a $set — an unaddressable path is written as a
+     * patched replaceOne, and patching needs what is being patched.
+     */
+    onSetField?:
+      | ((id: unknown, document: unknown, path: FieldPath, value: unknown) => void)
+      | null;
+    /** Removes one field or array element of one document. */
+    onRemoveField?: ((id: unknown, document: unknown, path: FieldPath) => void) | null;
   } = $props();
 
   const INDENT = 2;
+  const ID_SHOWN = 44;
 
   let writable = $derived(
     edits !== null && collection !== null && onReplace !== null && onDelete !== null,
   );
+
+  // The per-field affordances need their own two callbacks as well, and all or
+  // none: a pencil with no route to the gate would be a button that does
+  // nothing.
+  let fieldWritable = $derived(writable && onSetField !== null && onRemoveField !== null);
 
   // The value JsonTree renders for one document. `doc` is normally already
   // the parsed object — see the module comment above for why
@@ -132,6 +185,53 @@
     node.focus();
     node.setSelectionRange(0, 0);
   }
+
+  // The document's own _id, compactly, for the card's header line. An
+  // ObjectId reads as ObjectId("…") here exactly as it does in the tree —
+  // recogniseExtended is the one place that mapping lives.
+  function idLabel(id: unknown): string {
+    const extended = recogniseExtended(id);
+    if (extended !== null) return extended.text;
+    if (typeof id === "string") return id;
+    return JSON.stringify(id) ?? String(id);
+  }
+
+  function clipped(text: string): string {
+    return text.length > ID_SHOWN ? `${text.slice(0, ID_SHOWN)}…` : text;
+  }
+
+  // What JsonTree needs to make this card's leaves editable. One per card, so
+  // the open-box ids of two cards showing the same shapes never collide — the
+  // scope is the card's own identity, which is its _id.
+  function editing(value: unknown, id: unknown): JsonEditing | null {
+    if (!fieldWritable || edits === null) return null;
+    return {
+      edits,
+      scope: idOf(id),
+      onSet: (path, next) => onSetField?.(id, value, path, next),
+      onRemove: (path) => onRemoveField?.(id, value, path),
+      refusal,
+      caveat,
+    };
+  }
+
+  // _id is the one field with no pencil at all. Every write here is addressed
+  // by it, so typing over it would be asking for a different document.
+  function refusal(path: FieldPath): string | null {
+    return path.length === 1 && path[0] === "_id" ? ID_NOT_EDITABLE : null;
+  }
+
+  // What the human is told before the confirm, when the statement about to be
+  // built is bigger than the change they made. Both cases are honest endings
+  // rather than refusals — see mutateValue's writeFieldCommand and
+  // removeFieldCommand — and both are worth reading before, not after.
+  function caveat(path: FieldPath, action: "set" | "remove"): string | null {
+    if (action === "remove" && typeof path[path.length - 1] === "number") {
+      const array = path.slice(0, -1);
+      return dottedPath(array) === null ? WHOLE_DOCUMENT_FALLBACK : ARRAY_ELEMENT_REWRITE;
+    }
+    return dottedPath(path) === null ? WHOLE_DOCUMENT_FALLBACK : null;
+  }
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col">
@@ -148,18 +248,34 @@
           {@const identity = documentId(value)}
           {@const open = identity !== null && edits?.open === idOf(identity.id)}
           <div class="rounded-control border border-border bg-surface">
-            {#if writable}
-              <!-- The card's own action strip. It sits above the document
-                   rather than floating over it, so a long document scrolls
-                   under nothing, and it holds its place whether or not it is
-                   hovered — the same bargain RecordPane's buttons make. -->
-              <div
-                class="flex items-center gap-2 border-b border-border/60 px-2 py-1"
-              >
-                <span class="mr-auto font-mono text-xs text-text-subtle tabular-nums">#{i + 1}</span>
+            <!-- The card's header line: what this card *is*, then what can be
+                 done to it. The index sits small in the corner and the _id is
+                 surfaced beside it, so a stack of cards can be scanned without
+                 opening any of them. It sits above the document rather than
+                 floating over it, so a long document scrolls under nothing,
+                 and it holds its place whether or not it is hovered — the same
+                 bargain RecordPane's buttons make. -->
+            <div class="flex items-center gap-2 border-b border-border/60 px-2 py-1">
+              <span class="shrink-0 font-mono text-xs tabular-nums text-text-subtle">#{i + 1}</span>
+              {#if identity === null}
+                <span
+                  class="min-w-0 flex-1 truncate text-xs text-text-subtle italic"
+                  title={DOCUMENT_WITHOUT_ID}
+                >
+                  no _id
+                </span>
+              {:else}
+                {@const label = idLabel(identity.id)}
+                <span class="flex min-w-0 flex-1 items-baseline gap-1.5 font-mono text-xs" title={label}>
+                  <span class="shrink-0 text-text-subtle">_id</span>
+                  <span class="min-w-0 truncate text-syntax-type">{clipped(label)}</span>
+                </span>
+              {/if}
+              <CopyJson {value} title="Copy this document" />
+              {#if writable}
                 {#if identity === null}
-                  <span class="truncate text-xs text-text-subtle italic" title={DOCUMENT_WITHOUT_ID}>
-                    read-only — no _id
+                  <span class="shrink-0 text-xs text-text-subtle italic" title={DOCUMENT_WITHOUT_ID}>
+                    read-only
                   </span>
                 {:else if open}
                   <button
@@ -220,8 +336,8 @@
                     Delete
                   </button>
                 {/if}
-              </div>
-            {/if}
+              {/if}
+            </div>
 
             {#if open}
               <div class="flex flex-col gap-2 p-2">
@@ -254,8 +370,16 @@
                 {/if}
               </div>
             {:else}
+              <!-- The body starts with the fields: the card is already the
+                   frame, so JsonTree's own outer braces would be a second one.
+                   Editing enters here, per field, wherever this pane was given
+                   the route to the gate. -->
               <div class="overflow-x-auto py-1">
-                <JsonTree value={documentValue(doc)} />
+                <JsonTree
+                  {value}
+                  bare
+                  edit={identity === null ? null : editing(value, identity.id)}
+                />
               </div>
             {/if}
           </div>
@@ -267,10 +391,12 @@
   <div
     class="flex shrink-0 items-center gap-2 border-t border-border px-3 py-2 text-xs text-text-muted"
   >
-    <!-- A refusal with a box open is already shown against that box; this line
-         is for the ones with nowhere else to go — a delete the gate refused,
-         a collection the grammar cannot name. -->
-    {#if edits?.failure && edits.open === null}
+    <!-- A refusal with the whole-document box open is already shown against
+         that box; this line is for the ones with nowhere else to go — a
+         delete the gate refused, a collection the grammar cannot name, an
+         inline field edit the gate would not run (an inline row is one line
+         high and has nowhere to put a sentence). -->
+    {#if edits?.failure && (edits.open === null || isFieldBox(edits.open))}
       <span class="min-w-0 truncate text-danger" title={edits.failure}>{edits.failure}</span>
     {:else}
       <span class="min-w-0 truncate">{message}</span>

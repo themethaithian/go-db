@@ -39,6 +39,12 @@ export class ValueEdits {
   #open = $state<string | null>(null);
   #draft = $state("");
 
+  // The box's second field, for the one box that has two: adding a field to a
+  // JSON object needs a name as well as a value, and both have to survive a
+  // declined Inline Confirm for the same reason the draft does. Every other
+  // box leaves it empty and never reads it.
+  #name = $state("");
+
   // Why the statement could not be built from what is in the box — a value the
   // quoter cannot represent, a score that is not a number, JSON that does not
   // parse. It is kept apart from the gate's own failure while it is being set,
@@ -80,14 +86,26 @@ export class ValueEdits {
     this.#draft = text;
   }
 
+  /** The name in the open box, for the box that asks for one. */
+  get name(): string {
+    return this.#name;
+  }
+
+  set name(text: string) {
+    this.#name = text;
+  }
+
   /**
    * Opens one row or card for typing, holding the text it shows right now.
    * Opening clears the last refusal: the message was about what was in the box
    * before, and leaving it up would attach it to what is in it now.
+   *
+   * `name` is the second field, and only the add-a-field box has one.
    */
-  begin(id: string, text: string) {
+  begin(id: string, text: string, name: string = "") {
     this.#open = id;
     this.#draft = text;
+    this.#name = name;
     this.#refusal = null;
     this.#gate.clearFailure();
   }
@@ -108,6 +126,7 @@ export class ValueEdits {
   cancel() {
     this.#open = null;
     this.#draft = "";
+    this.#name = "";
     this.#refusal = null;
     this.#gate.clearFailure();
   }
@@ -153,6 +172,7 @@ export class ValueEdits {
 
     this.#open = null;
     this.#draft = "";
+    this.#name = "";
     return true;
   }
 

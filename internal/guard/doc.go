@@ -18,6 +18,17 @@
 // statement and each gets its own verdict. Text it cannot parse becomes one
 // span running to the end of the buffer, which Classify then withholds.
 //
+// ClassifyRedis is the same verdict for the Redis Engine (ADR 0006), and there
+// is only one layer behind it: Redis has no read-only transaction, so nothing
+// catches a command this classifier gets wrong. It is therefore a closed
+// allowlist of commands proven to only read, seeded from Redis's own
+// readonly/write flags and pinned against a real server's COMMAND INFO, with
+// container commands judged by the (command, subcommand) pair. A command whose
+// write-ness depends on its arguments — SORT, GEORADIUS, BITFIELD, GETEX,
+// XREAD — is not on it; the _RO forms are, which is what keeps the allowlist
+// provable without parsing arguments. Blocking and mode-switching commands are
+// off it too, because the editor shares one connection.
+//
 // # Impact Preview
 //
 // PlanPreview rewrites a mutation into the reads that describe it — a COUNT and

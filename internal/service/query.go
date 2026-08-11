@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/themethaithian/go-db/internal/db"
 	"github.com/themethaithian/go-db/internal/guard"
@@ -64,10 +65,23 @@ type QueryResult struct {
 	Origin         guard.Origin         `json:"origin"`
 	Message        string               `json:"message"`
 
-	// Columns, Rows, and Truncated are set only when Status is QueryOK.
+	// Columns, Rows, and Truncated are set only when Status is QueryOK, and
+	// only for an Engine whose answers are columns and rows.
 	Columns   []string    `json:"columns,omitempty"`
 	Rows      [][]*string `json:"rows,omitempty"`
 	Truncated bool        `json:"truncated"`
+
+	// Value is the answer of an Engine that replies with one typed value —
+	// Redis — and is set only when Status is QueryOK. It is the Result union's
+	// Value arm carried out to the UI unchanged (ADR-0006), so the renderer
+	// sees the reply tree the database sent rather than a flattening of it.
+	//
+	// It and Columns/Rows are alternatives, never both: a read comes back in
+	// exactly one shape, and which one is a fact about the Engine. A pointer
+	// so it is absent from the JSON rather than present as an empty reply,
+	// which would be a value the database never sent — and so that a table
+	// answer serialises exactly as it did before this field existed.
+	Value *db.Reply `json:"value,omitempty"`
 
 	// PendingID names the withheld mutation when Status is
 	// QueryRequiresConfirmation, and is what ConfirmPending and CancelPending
@@ -91,20 +105,28 @@ type QueryResult struct {
 // OK reports whether the query ran and returned rows.
 func (r QueryResult) OK() bool { return r.Status == QueryOK }
 
-// Classify reports whether sql is provably read-only, without connecting to
-// anything or running it. It is what the editor's read/mutation badge shows
-// while the human is still typing, and it is the same verdict RunQuery will
-// reach for the same text.
-func (s *AppService) Classify(sql string) guard.Classification {
-	return guard.Classify(sql)
+// Classify reports whether statement is provably read-only on engine, without
+// connecting to anything or running it. It is what the editor's read/mutation
+// badge shows while the human is still typing, and it is the same verdict
+// RunQuery will reach for the same text on a Profile of that Engine.
+//
+// The Engine is a parameter here and a lookup in RunQuery, and the difference
+// is deliberate. This is the badge: it is advisory, it is asked on every
+// keystroke, and the caller already knows which Profile the editor is pointed
+// at — so it says which language to read the text in rather than making the
+// facade re-read the Profile store to find out. Nothing executes on the
+// strength of the answer. What executes goes through RunQuery, which takes the
+// Engine from the saved Profile precisely because no caller may choose it.
+func (s *AppService) Classify(engine db.Engine, statement string) guard.Classification {
+	return classifyFor(engine, statement)
 }
 
-// SplitStatements reports where every statement in sql begins and ends, so the
-// editor can run the one under the cursor instead of the whole buffer. The
-// boundaries come from the same parser the classifier uses, so the span the
-// badge is computed from is the text RunQuery is given.
-func (s *AppService) SplitStatements(sql string) []guard.StatementSpan {
-	return guard.SplitStatements(sql)
+// SplitStatements reports where every statement in buffer begins and ends on
+// engine, so the editor can run the one under the cursor instead of the whole
+// buffer. The boundaries come from the same place the Engine's classifier
+// reads, so the span the badge is computed from is the text RunQuery is given.
+func (s *AppService) SplitStatements(engine db.Engine, buffer string) []guard.StatementSpan {
+	return splitFor(engine, buffer)
 }
 
 // RunQuery submits one query on the named Profile and database, on behalf of
@@ -117,8 +139,13 @@ func (s *AppService) SplitStatements(sql string) []guard.StatementSpan {
 // localhost API, the MCP proxy and the Explorer all submit, and what the editor
 // submits until a human picks a database.
 //
-// Every query passes the Approval Gate's classifier first. Anything not
-// provably read-only is withheld and takes its Origin's route. A read executes
+// Every query passes the Approval Gate's classifier first — the one the
+// Profile's own Engine names, resolved here and taken from the saved Profile
+// rather than from the caller (ADR-0006). A Profile that is not there has no
+// Engine, so its statement is not judged at all and nothing runs: the query
+// fails with what the store said, as it always did.
+//
+// Anything not provably read-only is withheld and takes its Origin's route. A read executes
 // inside a database-enforced read-only transaction, so a statement the
 // classifier misjudged is caught a second time: if the database refuses it for
 // writing, the query is reclassified and rerouted to the gate on the same
@@ -137,11 +164,28 @@ func (s *AppService) SplitStatements(sql string) []guard.StatementSpan {
 // poll for, so the pause lives in the call it already made, and ctx is how the
 // caller withdraws: an MCP client that dies takes its pending mutation with it.
 func (s *AppService) RunQuery(ctx context.Context, profileName, database, sql string, origin guard.Origin) QueryResult {
-	classification := guard.Classify(sql)
+	engine, err := s.engineFor(profileName)
+	if err != nil {
+		// No Profile, no Engine, no classifier: the statement stays unjudged
+		// rather than being read as SQL on the strength of nothing. What the
+		// human is told is unchanged — a Profile that is not there is not
+		// connected, in the same words as one that is saved and not connected,
+		// because from the editor those are the same mistake. Anything else
+		// wrong with the store is its own failure and is reported as one.
+		result := QueryResult{Classification: guard.Unjudged(noEngine), Origin: origin}
+		if errors.Is(err, db.ErrProfileNotFound) {
+			return notConnected(result, profileName)
+		}
+		result.Status = QueryFailed
+		result.Message = oneLine(err)
+		return result
+	}
+
+	classification := classifyFor(engine, sql)
 	result := QueryResult{Classification: classification, Origin: origin}
 
 	if !classification.IsRead() {
-		return s.withhold(ctx, profileName, database, sql, result)
+		return s.withhold(ctx, engine, profileName, database, sql, result)
 	}
 
 	conn, err := s.registry.Conn(ctx, profileName, database)
@@ -149,7 +193,7 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, database, sql st
 		return noConnection(result, profileName, err)
 	}
 
-	rows, err := readTable(ctx, conn, sql)
+	answer, err := conn.ReadQuery(ctx, sql)
 	switch {
 	case errors.Is(err, db.ErrWriteAttempt):
 		// The classifier was wrong and the database caught it. The query is a
@@ -157,17 +201,45 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, database, sql st
 		// recognised upfront — including the confirmation and the preview,
 		// which will usually have none for a statement nobody can rewrite.
 		result.Classification = guard.Backstopped()
-		return s.withhold(ctx, profileName, database, sql, result)
+		return s.withhold(ctx, engine, profileName, database, sql, result)
 
 	case err != nil:
 		result.Status = QueryFailed
 		result.Message = oneLine(err)
 		return result
 	}
+	return rendered(result, answer)
+}
 
-	result.Status = QueryOK
-	result.Columns, result.Rows, result.Truncated = rows.Columns, rows.Rows, rows.Truncated
-	result.Message = summarise(rows)
+// rendered fills in the answer a read came back with, whichever arm of the
+// Result union holds it.
+//
+// This is the one place the facade renders a read for the UI, and it takes both
+// arms that exist rather than demanding a table, because which arm arrives is a
+// fact about the Engine and not a mistake (ADR-0006). The arms are alternatives:
+// a table answer sets Columns, Rows and Truncated exactly as it always did, a
+// value answer sets Value, and neither ever sets the other's fields.
+//
+// An arm nothing produces yet — Documents, or a Result no adapter tagged — is
+// still a loud failure, for the reason readTable gives: there is nothing honest
+// to show for it, and an empty table is a real answer a database can give, so
+// rendering one here would invent a reply.
+func rendered(result QueryResult, answer db.Result) QueryResult {
+	if rows, ok := answer.Table(); ok {
+		result.Status = QueryOK
+		result.Columns, result.Rows, result.Truncated = rows.Columns, rows.Rows, rows.Truncated
+		result.Message = summarise(rows)
+		return result
+	}
+	if value, ok := answer.Value(); ok {
+		result.Status = QueryOK
+		result.Value = &value
+		result.Message = summariseValue(value)
+		return result
+	}
+
+	result.Status = QueryFailed
+	result.Message = fmt.Sprintf("this answer came back as %s, which go-db cannot show yet", resultShape(answer))
 	return result
 }
 
@@ -180,7 +252,7 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, database, sql st
 // connected is reported rather than queued against nothing. Both get the same
 // preview, computed the same way: what the human is deciding on does not depend
 // on who asked.
-func (s *AppService) withhold(ctx context.Context, profileName, database, sql string, result QueryResult) QueryResult {
+func (s *AppService) withhold(ctx context.Context, engine db.Engine, profileName, database, sql string, result QueryResult) QueryResult {
 	conn, err := s.registry.Conn(ctx, profileName, database)
 	if err != nil {
 		return noConnection(result, profileName, err)
@@ -192,7 +264,7 @@ func (s *AppService) withhold(ctx context.Context, profileName, database, sql st
 		SQL:            sql,
 		Origin:         result.Origin,
 		Classification: result.Classification,
-		Preview:        s.previewImpact(ctx, conn, sql),
+		Preview:        s.previewImpact(ctx, engine, conn, sql),
 	}
 
 	if result.Origin != guard.OriginHuman {
@@ -248,21 +320,21 @@ func confirmationMessage(classification guard.Classification, preview guard.Prev
 }
 
 // readTable runs one read on conn and unwraps the Table arm of what comes back.
-// It is the one place this package turns a db.Result into rows, and every read
-// the facade performs — the editor's query, the Database tree's introspection,
-// an Impact Preview's count — goes through it.
+// It is what every read that genuinely needs a table goes through — the
+// Database tree's introspection, an Impact Preview's count — as opposed to the
+// editor's own query, which renders whichever arm arrives and goes through
+// rendered instead.
 //
-// The unwrapping can fail, and it must fail loudly. Every Engine with an adapter
-// today answers with the Table arm, so a Result of any other kind means an
-// adapter for an Engine whose answers are documents or one typed value has been
-// wired to a facade that only knows how to render a table (ADR-0006). There is
-// nothing sensible to show for it: the Table arm's zero value is an empty
-// columns-and-rows answer, and an empty answer is a real result a database can
-// return — reporting one here would be inventing a reply the database never
-// gave. So the shape mismatch is returned as an error, which every caller
-// already knows how to report, and it names the kind it was given so the fix is
-// obvious. When those Engines arrive, this is the seam their views hang off,
-// and the branch is already here.
+// The unwrapping can fail, and it must fail loudly. These callers are asking a
+// SQL question and doing arithmetic on the answer: counting a preview's rows,
+// listing a schema's tables. An Engine whose answers are documents or one typed
+// value has no table to give them (ADR-0006), and there is nothing sensible to
+// substitute — the Table arm's zero value is an empty columns-and-rows answer,
+// and an empty answer is a real result a database can return, so reporting one
+// here would invent a reply the database never gave. The shape mismatch is
+// returned as an error instead, which every caller already knows how to report,
+// and it names the kind it was given so the fix is obvious. When those Engines
+// grow introspection of their own, this is the seam it hangs off.
 func readTable(ctx context.Context, conn db.Conn, sql string) (db.ResultSet, error) {
 	result, err := conn.ReadQuery(ctx, sql)
 	if err != nil {
@@ -301,4 +373,57 @@ func summarise(rows db.ResultSet) string {
 		return "1 row."
 	}
 	return fmt.Sprintf("%d rows.", len(rows.Rows))
+}
+
+// summariseValue is summarise for an Engine that answers with one typed value.
+// It says the same two things — how much came back, and whether that is all of
+// it — in the units a reply is measured in, and it names the kind because a
+// value's kind is the answer as much as its contents are: nil and the empty
+// string are different replies, and only the kind tells them apart.
+//
+// Only the outermost node is described. A container cut short deep inside the
+// tree marks itself, and the renderer says "and more" where the more actually
+// is; repeating that up here would say it in the wrong place.
+func summariseValue(reply db.Reply) string {
+	switch reply.Kind {
+	case db.ReplyNil:
+		return "1 value: nothing is stored there."
+	case db.ReplyArray:
+		return "1 value: " + containerOf("a list", len(reply.Items), "items", reply.Truncated)
+	case db.ReplyMap:
+		return "1 value: " + containerOf("a map", len(reply.Entries), "entries", reply.Truncated)
+	case db.ReplyError:
+		return "1 value: an error the server sent back inside the reply."
+	default:
+		return "1 value: " + replyKindName(reply.Kind) + "."
+	}
+}
+
+// containerOf describes a reply's list or map: what it is, how much of it there
+// is, and whether that is the whole of it.
+func containerOf(what string, size int, unit string, truncated bool) string {
+	if truncated {
+		return fmt.Sprintf("%s, showing the first %d %s; it was truncated.", what, size, unit)
+	}
+	if size == 1 {
+		return fmt.Sprintf("%s of 1 %s.", what, strings.TrimSuffix(unit, "s"))
+	}
+	return fmt.Sprintf("%s of %d %s.", what, size, unit)
+}
+
+// replyKindName is a scalar reply's kind as a human writes it. An unknown kind
+// is quoted rather than described: it is an adapter's word, not one from here.
+func replyKindName(kind db.ReplyKind) string {
+	switch kind {
+	case db.ReplyString:
+		return "a string"
+	case db.ReplyInteger:
+		return "an integer"
+	case db.ReplyDouble:
+		return "a number"
+	case db.ReplyBoolean:
+		return "a boolean"
+	default:
+		return fmt.Sprintf("%q", kind)
+	}
 }

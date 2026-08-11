@@ -195,7 +195,19 @@ func (s *AppService) decidedNow(outcome guard.Decision) guard.Outcome {
 // count is advisory, the statement is still the human's to confirm, and the
 // database's own words about why it could not be counted are more useful in the
 // confirmation than an error where the query used to be.
-func (s *AppService) previewImpact(ctx context.Context, conn db.Conn, sql string) guard.Preview {
+//
+// Only MySQL is previewed. ADR-0006 keeps the Impact Preview advisory and
+// per-Engine, and gives Redis and MongoDB rewrites of their own that are a
+// later task; until they are written, a mutation on either has no preview and
+// says so. That is checked here rather than left to PlanPreview, which reads
+// SQL and would refuse a Redis command as unparseable — the right outcome for
+// the wrong reason, and one that would start lying the day a command line
+// happened to parse as SQL.
+func (s *AppService) previewImpact(ctx context.Context, engine db.Engine, conn db.Conn, sql string) guard.Preview {
+	if engine != db.EngineMySQL {
+		return guard.NoPreview(noPreviewFor(engine))
+	}
+
 	plan, ok := guard.PlanPreview(sql)
 	if !ok {
 		return guard.NoPreview(plan.Reason)

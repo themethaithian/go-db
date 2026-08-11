@@ -129,6 +129,21 @@ func Backstopped() Classification {
 	return mutation("the database rejected a write inside the read-only transaction this query ran in")
 }
 
+// Unjudged returns the Classification of a statement no classifier here can
+// judge at all, with reason saying why in one line for the human.
+//
+// It is the verdict for an Engine whose classifier is not written yet, and it
+// exists so that gap is a Mutation rather than a hole. ADR-0006 gives each
+// Engine one classifier and makes every one of them a closed allowlist that
+// fails closed; an Engine with no allowlist at all has proved nothing about
+// anything, so everything it submits is withheld — a MongoDB find() as surely
+// as a MongoDB drop(). Nothing is quietly waved through while the classifier
+// that would have judged it is still being written.
+//
+// The caller says why, because the reason names an Engine and this package
+// does not import the one that defines them.
+func Unjudged(reason string) Classification { return mutation(reason) }
+
 // classifyStatement judges one parsed statement, in two passes. The first asks
 // whether the statement's own form is read-only; the second walks everything
 // underneath it, because a lock or a nested statement anywhere in the tree

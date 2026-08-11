@@ -12,14 +12,22 @@ import (
 	"github.com/themethaithian/go-db/internal/service"
 )
 
+// mysqlOnly is the Drivers map of a build that reaches one Engine. Most of
+// these tests are about the facade rather than about Engines, and a Profile
+// they save is a MySQL one, so this is what they hand the Connection Registry;
+// a test about the dispatch builds the map it means (see engine_test.go).
+func mysqlOnly(driver db.Driver) db.Drivers {
+	return db.Drivers{db.EngineMySQL: driver}
+}
+
 // newConnectedFacade builds an App Service whose Connection Registry opens
 // connections through driver rather than a real MySQL server.
 func newConnectedFacade(t *testing.T, keychain db.Keychain, driver db.Driver) *service.AppService {
 	t.Helper()
 	// A real audit log in a throwaway directory, and the real clock: tests that
 	// care about either build their facade with newGate instead.
-	return service.NewWithDriver(
-		db.NewProfileStore(t.TempDir(), keychain), driver,
+	return service.NewWithDrivers(
+		db.NewProfileStore(t.TempDir(), keychain), mysqlOnly(driver),
 		guard.NewJSONLAuditLog(t.TempDir()), nil,
 	)
 }
@@ -30,7 +38,7 @@ func newTunnelledFacade(t *testing.T, driver db.Driver, tunnels db.TunnelDialer)
 	t.Helper()
 
 	return service.NewWithApproval(
-		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver, tunnels,
+		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), mysqlOnly(driver), tunnels,
 		guard.NewJSONLAuditLog(t.TempDir()), nil, 0, nil,
 	)
 }

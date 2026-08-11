@@ -56,7 +56,7 @@ func newTestApp(t *testing.T) *testApp {
 
 	driver := dbtest.NewFakeDriver()
 	svc := service.NewWithApproval(
-		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver, nil,
+		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), db.Drivers{db.EngineMySQL: driver}, nil,
 		guard.NewJSONLAuditLog(t.TempDir()), nil, approvalTimeout, nil,
 	)
 

@@ -65,7 +65,7 @@ func newTestServerWithApproval(t *testing.T, approvalTimeout time.Duration) *tes
 
 	driver := dbtest.NewFakeDriver()
 	svc := service.NewWithApproval(
-		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver, nil,
+		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), db.Drivers{db.EngineMySQL: driver}, nil,
 		guard.NewJSONLAuditLog(t.TempDir()), nil, approvalTimeout, nil,
 	)
 
@@ -183,8 +183,8 @@ func TestListenerBindsLoopbackOnly(t *testing.T) {
 
 func TestTokenFileLifecycle(t *testing.T) {
 	driver := dbtest.NewFakeDriver()
-	svc := service.NewWithDriver(
-		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), driver,
+	svc := service.NewWithDrivers(
+		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), db.Drivers{db.EngineMySQL: driver},
 		guard.NewJSONLAuditLog(t.TempDir()), nil,
 	)
 	dir := t.TempDir()

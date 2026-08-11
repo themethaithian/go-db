@@ -50,6 +50,7 @@
   import {
     configuredDatabase,
     databasesOf,
+    engineOf,
     ensureColumns,
     ensureDatabases,
     ensureIndexes,
@@ -103,6 +104,11 @@
   // on. They must, because a statement runs as written and the schema it means
   // is whichever one the connection is open on.
   let database = $derived(doc.database);
+
+  // The Engine of the selected Profile: which language the gate reads this
+  // buffer in, for the badge and for where one statement ends. Nothing is run
+  // on it — RunQuery takes the Engine from the saved Profile itself.
+  let engine = $derived(engineOf(profileName));
 
   let classification = $state<guard.Classification | null>(null);
   let running = $state(false);
@@ -317,7 +323,7 @@
     const timer = setTimeout(async () => {
       let ranges: StatementRange[];
       try {
-        ranges = editorRanges(text, await SplitStatements(text));
+        ranges = editorRanges(text, await SplitStatements(engine, text));
       } catch {
         // The gate is unreachable — rather than leaving Run dead with text on
         // screen, treat the buffer as the one statement it usually is and let
@@ -372,7 +378,7 @@
       return;
     }
     const timer = setTimeout(async () => {
-      classification = await Classify(text);
+      classification = await Classify(engine, text);
     }, 250);
     return () => clearTimeout(timer);
   });

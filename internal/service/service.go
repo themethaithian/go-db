@@ -24,22 +24,34 @@ type AppService struct {
 	clock   guard.Clock
 }
 
-// New returns an App Service backed by the given ProfileStore, connecting to
-// MySQL and recording every gate decision in audit.
+// New returns an App Service backed by the given ProfileStore, dialling each
+// Profile with the adapter its Engine names and recording every gate decision
+// in audit.
+//
+// This is where the shipping app's Drivers map is built, and so the one place
+// that says which Engines this build can actually reach: MySQL and Redis
+// today. A Profile naming any other Engine — MongoDB, whose adapter is not
+// written, or a word somebody typed into profiles.toml — fails at the
+// Connection Registry with db.ErrEngineUnsupported rather than being dialled
+// by whichever adapter happened to be there.
 func New(profiles *db.ProfileStore, audit guard.AuditLog) *AppService {
-	return NewWithDriver(profiles, db.NewMySQLDriver(), audit, time.Now)
+	return NewWithDrivers(profiles, db.Drivers{
+		db.EngineMySQL: db.NewMySQLDriver(),
+		db.EngineRedis: db.NewRedisDriver(),
+	}, audit, time.Now)
 }
 
-// NewWithDriver returns an App Service whose Connection Registry opens
-// connections through driver and whose gate decisions are timestamped by clock.
-// It is the seam tests use to substitute a fake database and a clock they
-// control; the shipping binary calls New. A nil clock means time.Now, and
-// Approval Console entries expire after guard.ApprovalTimeout.
-func NewWithDriver(profiles *db.ProfileStore, driver db.Driver, audit guard.AuditLog, clock guard.Clock) *AppService {
-	return NewWithApproval(profiles, driver, nil, audit, clock, 0, nil)
+// NewWithDrivers returns an App Service whose Connection Registry opens
+// connections through drivers — one Driver per Engine — and whose gate
+// decisions are timestamped by clock. It is the seam tests use to substitute
+// fake databases and a clock they control; the shipping binary calls New. A nil
+// clock means time.Now, and Approval Console entries expire after
+// guard.ApprovalTimeout.
+func NewWithDrivers(profiles *db.ProfileStore, drivers db.Drivers, audit guard.AuditLog, clock guard.Clock) *AppService {
+	return NewWithApproval(profiles, drivers, nil, audit, clock, 0, nil)
 }
 
-// NewWithApproval is NewWithDriver with the two things only a test needs opened
+// NewWithApproval is NewWithDrivers with the two things only a test needs opened
 // up: the tunnel dialler a Profile's bastion is reached through, and the
 // Approval Console's deadline — entries auto-reject timeout after they were
 // submitted, measured with timer.
@@ -49,13 +61,13 @@ func NewWithDriver(profiles *db.ProfileStore, driver db.Driver, audit guard.Audi
 // test needs to reach the auto-reject path at all — a unit test fires timer
 // itself, and an integration test injects a deadline it can afford to wait out.
 // Nothing in the shipping binary calls it.
-func NewWithApproval(profiles *db.ProfileStore, driver db.Driver, tunnels db.TunnelDialer, audit guard.AuditLog, clock guard.Clock, timeout time.Duration, timer guard.Timer) *AppService {
+func NewWithApproval(profiles *db.ProfileStore, drivers db.Drivers, tunnels db.TunnelDialer, audit guard.AuditLog, clock guard.Clock, timeout time.Duration, timer guard.Timer) *AppService {
 	if clock == nil {
 		clock = time.Now
 	}
 	return &AppService{
 		profiles: profiles,
-		registry: db.NewRegistryWithTunnels(db.Drivers{db.EngineMySQL: driver}, tunnels, profiles),
+		registry: db.NewRegistryWithTunnels(drivers, tunnels, profiles),
 		pending:  guard.NewQueue(clock, timeout, timer),
 		audit:    audit,
 		clock:    clock,

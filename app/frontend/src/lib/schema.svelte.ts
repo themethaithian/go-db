@@ -86,6 +86,11 @@ export function isSystemDatabase(name: string): boolean {
   return SYSTEM_DATABASES.has(name);
 }
 
+// The Engine a Profile is assumed to be on until the saved list says
+// otherwise. It is what the backend's own Profile store normalizes an unset
+// Engine to, so the two agree rather than drifting.
+const MYSQL = "mysql";
+
 const nodes = $state<Record<string, ProfileNode>>({});
 
 // The table caches, one per Profile *and* database, keyed by both. A flat map
@@ -99,6 +104,12 @@ const schemas = $state<Record<string, DatabaseNode>>({});
 // nothing else does: opening a Profile on the database it names, and
 // attributing pins written before there was a databases level.
 const configured = $state<Record<string, string>>({});
+
+// The Profiles' own Engines, as saved. The Editor needs one before it can ask
+// the gate anything: which classifier judges a statement, and where one
+// statement ends, are the Engine's to say (ADR-0006). It rides along with
+// `configured` because both are read out of the same Profile list.
+const engines = $state<Record<string, string>>({});
 
 // Resolves once the configured map reflects the saved Profiles. loadDatabases
 // waits on it so the auto-open cannot lose a race with a human who expands a
@@ -271,6 +282,21 @@ export function configuredDatabase(profileName: string): string {
   return configured[profileName] ?? "";
 }
 
+/**
+ * The Engine of a saved Profile: what language its statements are written in,
+ * and so which classifier and which splitter the gate uses on them.
+ *
+ * Anything not yet known is MySQL — no Profile picked, the Profile list still
+ * loading, a name nobody saved. That is the badge being advisory rather than a
+ * guess with consequences: nothing runs on this answer, and what does run is
+ * judged by the Profile's own Engine, which the backend reads for itself.
+ */
+export function engineOf(profileName: string | null): string {
+  if (profileName === null) return MYSQL;
+  if (!configuredRequested) void reloadConfigured();
+  return engines[profileName] ?? MYSQL;
+}
+
 /** Expands or collapses a database, loading its tables the first time. */
 export function toggleDatabase(profileName: string, database: string) {
   const node = ensureDatabase(profileName, database);
@@ -399,7 +425,11 @@ function reloadConfigured(): Promise<void> {
   configuredLoad = ListProfiles().then(
     (profiles) => {
       for (const name of Object.keys(configured)) delete configured[name];
-      for (const profile of profiles) configured[profile.Name] = profile.Database ?? "";
+      for (const name of Object.keys(engines)) delete engines[name];
+      for (const profile of profiles) {
+        configured[profile.Name] = profile.Database ?? "";
+        engines[profile.Name] = profile.Engine || MYSQL;
+      }
       attributePins(configured);
     },
     () => {},

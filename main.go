@@ -7,8 +7,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/themethaithian/go-db/app"
 	"github.com/themethaithian/go-db/internal/api"
 	"github.com/themethaithian/go-db/internal/db"
@@ -47,11 +49,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	svc := service.NewWithDriver(
+	// go-redis logs dial failures through a process-global logger of its own,
+	// straight to stderr with a "redis:" prefix and a file and line from
+	// inside the library. A Profile pointed at a server that is not up is an
+	// ordinary thing to have saved, and the app already tells the human about
+	// it where they can see it — so the library's copy is routed here, in the
+	// shell, into one attributable line. This is a fact about a third-party
+	// package's global state, which is exactly the kind of thing main owns and
+	// internal/ must not touch.
+	redis.SetLogger(redisLogger{})
+
+	svc := service.New(
 		db.NewProfileStore(configDir, db.NewOSKeychain()),
-		db.NewMySQLDriver(),
 		guard.NewJSONLAuditLog(configDir),
-		time.Now,
 	)
 	shell := app.New(svc, processStart, version)
 
@@ -82,6 +92,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "go-db:", err)
 		os.Exit(1)
 	}
+}
+
+// redisLogger is where go-redis's own log output goes: one line on stderr,
+// attributed to go-db rather than to a package the human has never heard of,
+// and without the library's file-and-line stamp. It carries the same
+// information to the same place; what it drops is the noise.
+type redisLogger struct{}
+
+func (redisLogger) Printf(_ context.Context, format string, v ...any) {
+	fmt.Fprintf(os.Stderr, "go-db: "+strings.TrimSuffix(format, "\n")+"\n", v...)
 }
 
 // runMCP handles the `go-db mcp <profile-name>` subcommand: a required

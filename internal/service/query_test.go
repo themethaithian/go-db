@@ -189,9 +189,11 @@ func TestRunQueryOnAProfileThatIsNotConnected(t *testing.T) {
 	cases := []struct {
 		name    string
 		profile string
+		// judged is whether there was an Engine to judge the statement with.
+		judged bool
 	}{
-		{name: "a saved Profile with no open connection", profile: "local"},
-		{name: "a Profile that does not exist", profile: "nope"},
+		{name: "a saved Profile with no open connection", profile: "local", judged: true},
+		{name: "a Profile that does not exist", profile: "nope", judged: false},
 	}
 
 	for _, tc := range cases {
@@ -212,9 +214,12 @@ func TestRunQueryOnAProfileThatIsNotConnected(t *testing.T) {
 				t.Errorf("message spans lines, want one readable line:\n%s", got.Message)
 			}
 			// The classification still holds: the statement was a read, there
-			// was just nowhere to run it.
-			if !got.Classification.IsRead() {
-				t.Errorf("classification = %+v, want the read verdict to survive", got.Classification)
+			// was just nowhere to run it. Unless there was no Profile either —
+			// a Profile names the Engine, an Engine names the classifier, and
+			// with neither the statement is unjudged rather than read as SQL
+			// because SQL is what it looks like (ADR-0006).
+			if got.Classification.IsRead() != tc.judged {
+				t.Errorf("classification = %+v, want read = %v", got.Classification, tc.judged)
 			}
 		})
 	}
@@ -252,7 +257,7 @@ func TestClassifyIsExposedForTheEditor(t *testing.T) {
 		{"DELETE FROM users", guard.Mutation},
 		{"", guard.Mutation},
 	} {
-		got := svc.Classify(tc.sql)
+		got := svc.Classify(db.EngineMySQL, tc.sql)
 		if got.Kind != tc.want {
 			t.Errorf("Classify(%q).Kind = %q, want %q", tc.sql, got.Kind, tc.want)
 		}
@@ -271,7 +276,7 @@ func TestSplitStatementsIsExposedForTheEditor(t *testing.T) {
 
 	const sql = "SELECT 1; DELETE FROM users;"
 
-	got := svc.SplitStatements(sql)
+	got := svc.SplitStatements(db.EngineMySQL, sql)
 	if !slices.Equal(got, guard.SplitStatements(sql)) {
 		t.Fatalf("SplitStatements(%q) = %+v, want the domain's own answer", sql, got)
 	}

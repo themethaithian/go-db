@@ -127,18 +127,32 @@ func (a *App) ListIndexes(profileName, database, table string) service.IndexList
 	return a.svc.ListIndexes(a.ctx, profileName, database, table)
 }
 
-// Classify reports whether sql is provably read-only, without connecting to
-// anything or running it. The editor calls it as the human types, to drive
-// the read/mutation badge.
-func (a *App) Classify(sql string) guard.Classification {
-	return a.svc.Classify(sql)
+// Classify reports whether statement is provably read-only on engine, without
+// connecting to anything or running it. The editor calls it as the human
+// types, to drive the read/mutation badge, and passes the Engine of the
+// Profile it is pointed at — the badge has to read the text in the language it
+// is written in (ADR-0006).
+//
+// The Engine is the caller's here and the saved Profile's in RunQuery. Nothing
+// runs on the strength of this answer, so the editor naming the Engine it is
+// showing costs nothing and saves a Profile lookup per keystroke; what
+// executes is judged by the Profile's own Engine, which no caller can choose.
+//
+// It crosses as a plain string and is converted here. Wails generates a TS
+// type for a bound struct but not for a named string, so binding db.Engine
+// itself would emit a reference to a type the models file never declares —
+// widening the wire type is the adapter's job, and an Engine that means
+// nothing classifies as a mutation like everything else unproven.
+func (a *App) Classify(engine, statement string) guard.Classification {
+	return a.svc.Classify(db.Engine(engine), statement)
 }
 
-// SplitStatements returns the extent of every statement in sql. The editor
-// calls it to find the statement the cursor is in, so Run submits that one
-// statement rather than the whole buffer. The offsets are into UTF-8 bytes.
-func (a *App) SplitStatements(sql string) []guard.StatementSpan {
-	return a.svc.SplitStatements(sql)
+// SplitStatements returns the extent of every statement in buffer, as engine's
+// language separates them. The editor calls it to find the statement the
+// cursor is in, so Run submits that one statement rather than the whole
+// buffer. The offsets are into UTF-8 bytes.
+func (a *App) SplitStatements(engine, buffer string) []guard.StatementSpan {
+	return a.svc.SplitStatements(db.Engine(engine), buffer)
 }
 
 // RunQuery submits sql on the named Profile and database from the SQL editor.

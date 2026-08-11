@@ -125,7 +125,7 @@ func newGate(t *testing.T) *gate {
 
 	svc := service.NewWithApproval(
 		db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()),
-		driver,
+		db.Drivers{db.EngineMySQL: driver},
 		nil,
 		guard.NewJSONLAuditLog(auditDir),
 		clock.Now,

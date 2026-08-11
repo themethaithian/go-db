@@ -83,6 +83,20 @@ type QueryResult struct {
 	// answer serialises exactly as it did before this field existed.
 	Value *db.Reply `json:"value,omitempty"`
 
+	// Documents is the answer of an Engine that replies with a list of JSON
+	// documents — MongoDB — and is set only when Status is QueryOK. It is the
+	// Result union's Documents arm carried out to the UI unchanged (ADR-0006),
+	// so the renderer sees the same relaxed extended JSON the adapter built
+	// rather than a re-encoding of it.
+	//
+	// It, Value, and Columns/Rows/Truncated are alternatives, never more than
+	// one: a read comes back in exactly one shape, and which one is a fact
+	// about the Engine. A pointer for the reason Value is one — absent from
+	// the JSON rather than present as an empty list, which would be a value
+	// the database never sent — and so that a table or value answer's own
+	// wire shape is unchanged by this field existing.
+	Documents *db.DocumentSet `json:"documents,omitempty"`
+
 	// PendingID names the withheld mutation when Status is
 	// QueryRequiresConfirmation, and is what ConfirmPending and CancelPending
 	// are given. It is opaque: it identifies a statement the gate is holding,
@@ -214,16 +228,19 @@ func (s *AppService) RunQuery(ctx context.Context, profileName, database, sql st
 // rendered fills in the answer a read came back with, whichever arm of the
 // Result union holds it.
 //
-// This is the one place the facade renders a read for the UI, and it takes both
-// arms that exist rather than demanding a table, because which arm arrives is a
-// fact about the Engine and not a mistake (ADR-0006). The arms are alternatives:
-// a table answer sets Columns, Rows and Truncated exactly as it always did, a
-// value answer sets Value, and neither ever sets the other's fields.
+// This is the one place the facade renders a read for the UI, and it takes all
+// three arms that exist rather than demanding a table, because which arm
+// arrives is a fact about the Engine and not a mistake (ADR-0006). The arms
+// are alternatives: a table answer sets Columns, Rows and Truncated exactly as
+// it always did, a value answer sets Value, a documents answer sets Documents,
+// and none of the three ever sets another's fields.
 //
-// An arm nothing produces yet — Documents, or a Result no adapter tagged — is
-// still a loud failure, for the reason readTable gives: there is nothing honest
-// to show for it, and an empty table is a real answer a database can give, so
-// rendering one here would invent a reply.
+// A Result no adapter tagged is still a loud failure, for the reason readTable
+// gives: there is nothing honest to show for it, and an empty table is a real
+// answer a database can give, so rendering one here would invent a reply.
+// Every ADR-0006 arm renders now, so reaching this path means Conn.ReadQuery
+// returned the union's zero value — an adapter bug, not an Engine go-db
+// cannot show yet.
 func rendered(result QueryResult, answer db.Result) QueryResult {
 	if rows, ok := answer.Table(); ok {
 		result.Status = QueryOK
@@ -237,9 +254,15 @@ func rendered(result QueryResult, answer db.Result) QueryResult {
 		result.Message = summariseValue(value)
 		return result
 	}
+	if docs, ok := answer.Documents(); ok {
+		result.Status = QueryOK
+		result.Documents = &docs
+		result.Message = summariseDocuments(docs)
+		return result
+	}
 
 	result.Status = QueryFailed
-	result.Message = fmt.Sprintf("this answer came back as %s, which go-db cannot show yet", resultShape(answer))
+	result.Message = "this answer came back untagged: no arm of the Result union was set, which is an adapter bug rather than an Engine go-db cannot show"
 	return result
 }
 
@@ -373,6 +396,22 @@ func summarise(rows db.ResultSet) string {
 		return "1 row."
 	}
 	return fmt.Sprintf("%d rows.", len(rows.Rows))
+}
+
+// summariseDocuments is summarise for an Engine that answers with a list of
+// JSON documents — MongoDB. It says the same two things summarise says about a
+// table — how many came back, and whether that is all of it — in Documents'
+// own unit, mirroring summarise's wording (and Truncated's meaning) exactly so
+// the two read as the same sentence in different units rather than two
+// different voices.
+func summariseDocuments(docs db.DocumentSet) string {
+	if docs.Truncated {
+		return fmt.Sprintf("Showing the first %d documents; the result was truncated.", len(docs.Documents))
+	}
+	if len(docs.Documents) == 1 {
+		return "1 document."
+	}
+	return fmt.Sprintf("%d documents.", len(docs.Documents))
 }
 
 // summariseValue is summarise for an Engine that answers with one typed value.

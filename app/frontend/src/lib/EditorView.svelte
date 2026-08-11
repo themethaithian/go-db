@@ -23,6 +23,7 @@
   import SqlEditor from "./SqlEditor.svelte";
   import ResultsTable from "./ResultsTable.svelte";
   import ValueView from "./ValueView.svelte";
+  import DocumentsView from "./DocumentsView.svelte";
   import RecordPaneDock from "./RecordPaneDock.svelte";
   import InlineConfirm from "./InlineConfirm.svelte";
   import SaveBar from "./SaveBar.svelte";
@@ -1045,6 +1046,11 @@
                 Write a query above and press ⌘⏎ — or browse a table in the Explorer.
               </p>
             </div>
+          {:else if result.status === "ok" && result.documents !== undefined}
+            <!-- The Documents arm (ADR-0006): a list of JSON documents in
+                 place of the grid, for MongoDB. No RecordPaneDock here either
+                 — the same reason ValueView goes without one below. -->
+            <DocumentsView documents={result.documents} message={result.message} />
           {:else if result.status === "ok" && result.value !== undefined}
             <!-- The Value arm (ADR-0006): one Redis reply tree in place of the
                  grid. No RecordPaneDock here — picking rows is a table's own

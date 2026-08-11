@@ -85,6 +85,63 @@ var (
 	_ db.Conn   = (*valueConn)(nil)
 )
 
+// documentsDriver is a db.Driver whose reads answer with the Result union's
+// Documents arm, as the MongoDB adapter does. It gives a service-level test a
+// documents answer without dialling a real MongoDB — the substitution
+// valueDriver makes for Redis, one arm over.
+type documentsDriver struct {
+	mu       sync.Mutex
+	docs     db.DocumentSet
+	affected int64
+	reads    []string
+	execs    []string
+}
+
+func (d *documentsDriver) Open(context.Context, db.Profile, string, db.DialFunc) (db.Conn, error) {
+	return &documentsConn{driver: d}, nil
+}
+
+func (d *documentsDriver) Reads() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return append([]string(nil), d.reads...)
+}
+
+func (d *documentsDriver) Execs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return append([]string(nil), d.execs...)
+}
+
+type documentsConn struct{ driver *documentsDriver }
+
+func (documentsConn) Ping(context.Context) error { return nil }
+
+func (c *documentsConn) ReadQuery(_ context.Context, statement string) (db.Result, error) {
+	c.driver.mu.Lock()
+	defer c.driver.mu.Unlock()
+
+	c.driver.reads = append(c.driver.reads, statement)
+	return db.DocumentsResult(c.driver.docs.Documents, c.driver.docs.Truncated), nil
+}
+
+func (c *documentsConn) Exec(_ context.Context, statement string) (int64, error) {
+	c.driver.mu.Lock()
+	defer c.driver.mu.Unlock()
+
+	c.driver.execs = append(c.driver.execs, statement)
+	return c.driver.affected, nil
+}
+
+func (documentsConn) Close() error { return nil }
+
+var (
+	_ db.Driver = (*documentsDriver)(nil)
+	_ db.Conn   = (*documentsConn)(nil)
+)
+
 // newEngineFacade builds an App Service over a Drivers map the test chooses,
 // with one connected Profile named "store" on the given Engine.
 func newEngineFacade(t *testing.T, engine db.Engine, drivers db.Drivers) *service.AppService {
@@ -108,6 +165,15 @@ func newRedisFacade(t *testing.T, reply db.Reply) (*service.AppService, *valueDr
 
 	driver := &valueDriver{reply: reply}
 	return newEngineFacade(t, db.EngineRedis, db.Drivers{db.EngineRedis: driver}), driver
+}
+
+// newMongoFacade is newEngineFacade over an Engine whose answers are a list of
+// documents, with docs the answer every read gets.
+func newMongoFacade(t *testing.T, docs db.DocumentSet) (*service.AppService, *documentsDriver) {
+	t.Helper()
+
+	driver := &documentsDriver{docs: docs}
+	return newEngineFacade(t, db.EngineMongoDB, db.Drivers{db.EngineMongoDB: driver}), driver
 }
 
 // handWrittenProfile writes a profiles.toml holding one Profile named "store",
@@ -302,6 +368,121 @@ func TestMySQLResultJSONIsUnchanged(t *testing.T) {
 		`"truncated":false,"affected_rows":0}`
 	if string(got) != want {
 		t.Errorf("the wire shape of a MySQL read changed:\n got %s\nwant %s", got, want)
+	}
+}
+
+// A read on an Engine whose answers are a list of documents comes back as
+// that list, in the Documents field, with no columns, no rows and no value:
+// an empty table or a nil value would be an answer the database never gave.
+func TestRunQueryReturnsADocumentsAnswer(t *testing.T) {
+	docs := db.DocumentSet{Documents: []json.RawMessage{json.RawMessage(`{"_id":1,"name":"ada"}`)}}
+	svc, driver := newMongoFacade(t, docs)
+
+	got := svc.RunQuery(context.Background(), "store", "", "db.users.find({})", guard.OriginHuman)
+
+	if got.Status != service.QueryOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
+	}
+	if !got.Classification.IsRead() {
+		t.Errorf("classification = %+v, want a read", got.Classification)
+	}
+	if got.Documents == nil {
+		t.Fatal("Documents is nil, want the documents the database sent")
+	}
+	if len(got.Documents.Documents) != 1 || string(got.Documents.Documents[0]) != `{"_id":1,"name":"ada"}` {
+		t.Errorf("Documents = %+v, want the one document as sent", got.Documents)
+	}
+	if got.Value != nil || got.Columns != nil || got.Rows != nil {
+		t.Errorf("value = %v, columns = %v, rows = %v, want none of them for a documents answer",
+			got.Value, got.Columns, got.Rows)
+	}
+	if got.Message != "1 document." {
+		t.Errorf("message = %q, want %q", got.Message, "1 document.")
+	}
+	if reads := driver.Reads(); len(reads) != 1 || reads[0] != "db.users.find({})" {
+		t.Errorf("the database was asked %v, want the call as written, once", reads)
+	}
+}
+
+// The document-count message says how many came back and whether that is all
+// of it, in the same wording summarise gives a table — see summariseDocuments.
+func TestRunQueryDocumentCountMessageWording(t *testing.T) {
+	one := func(body string) json.RawMessage { return json.RawMessage(body) }
+
+	cases := []struct {
+		name string
+		docs db.DocumentSet
+		want string
+	}{
+		{"no documents", db.DocumentSet{Documents: []json.RawMessage{}}, "0 documents."},
+		{"one document", db.DocumentSet{Documents: []json.RawMessage{one("{}")}}, "1 document."},
+		{
+			"many documents",
+			db.DocumentSet{Documents: []json.RawMessage{one("{}"), one("{}"), one("{}")}},
+			"3 documents.",
+		},
+		{
+			"truncated",
+			db.DocumentSet{Documents: []json.RawMessage{one("{}")}, Truncated: true},
+			"Showing the first 1 documents; the result was truncated.",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			svc, _ := newMongoFacade(t, c.docs)
+
+			got := svc.RunQuery(context.Background(), "store", "", "db.users.find({})", guard.OriginHuman)
+
+			if got.Message != c.want {
+				t.Errorf("message = %q, want %q", got.Message, c.want)
+			}
+		})
+	}
+}
+
+// A MongoDB mutation takes the route every mutation takes: withheld by the
+// gate, shown with the Impact Preview there is none of yet, run only once a
+// human has confirmed it, and its own affected count reported back — the
+// Documents-armed Engine's turn through the same flow TestRedisMutationFlowsTheGate
+// proves for the Value-armed one.
+func TestMongoMutationFlowsTheGateWithNoPreview(t *testing.T) {
+	svc, driver := newMongoFacade(t, db.DocumentSet{})
+	driver.affected = 4
+	ctx := context.Background()
+
+	withheld := svc.RunQuery(ctx, "store", "", "db.users.deleteMany({})", guard.OriginHuman)
+
+	if withheld.Status != service.QueryRequiresConfirmation {
+		t.Fatalf("status = %q, want %q (message: %s)",
+			withheld.Status, service.QueryRequiresConfirmation, withheld.Message)
+	}
+	if withheld.Preview == nil {
+		t.Fatal("Preview is nil, want a preview that says there is none")
+	}
+	if withheld.Preview.Available {
+		t.Errorf("Preview.Available = true for a MongoDB statement: %+v", withheld.Preview)
+	}
+	if !strings.Contains(withheld.Preview.Reason, "MongoDB") {
+		t.Errorf("Preview.Reason = %q, want it to say MongoDB previews are not written yet", withheld.Preview.Reason)
+	}
+	if reads := driver.Reads(); len(reads) != 0 {
+		t.Errorf("the preview asked the database %v, want nothing asked at all", reads)
+	}
+	if execs := driver.Execs(); len(execs) != 0 {
+		t.Errorf("a withheld mutation executed %v", execs)
+	}
+
+	confirmed := svc.ConfirmPending(ctx, withheld.PendingID)
+
+	if confirmed.Status != service.QueryExecuted {
+		t.Fatalf("status = %q, want %q (message: %s)", confirmed.Status, service.QueryExecuted, confirmed.Message)
+	}
+	if confirmed.AffectedRows != 4 {
+		t.Errorf("AffectedRows = %d, want 4 — what the driver said it changed", confirmed.AffectedRows)
+	}
+	if execs := driver.Execs(); len(execs) != 1 || execs[0] != "db.users.deleteMany({})" {
+		t.Errorf("the database ran %v, want the command as written, once", execs)
 	}
 }
 

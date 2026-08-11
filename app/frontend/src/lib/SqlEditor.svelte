@@ -50,8 +50,9 @@
         syntax highlighting, keyword and schema completion — only means
         something for a "mysql" Profile; anything else falls back to plain
         text rather than colouring or completing a statement language this
-        editor does not know. There is no Redis highlighting to add in its
-        place (CLAUDE.md v1 scope) — plain text is the deliberate answer. */
+        editor does not know. There is no Redis or MongoDB highlighting to
+        add in their place (CLAUDE.md v1 scope) — plain text is the
+        deliberate answer for both. */
     engine?: string;
     onChange: (value: string) => void;
     /** Where the caret is, and whatever is selected under it ("" when nothing is). */

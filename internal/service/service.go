@@ -29,15 +29,16 @@ type AppService struct {
 // in audit.
 //
 // This is where the shipping app's Drivers map is built, and so the one place
-// that says which Engines this build can actually reach: MySQL and Redis
-// today. A Profile naming any other Engine — MongoDB, whose adapter is not
-// written, or a word somebody typed into profiles.toml — fails at the
-// Connection Registry with db.ErrEngineUnsupported rather than being dialled
-// by whichever adapter happened to be there.
+// that says which Engines this build can actually reach: all three ADR-0006
+// names now have an adapter here. A Profile naming any other Engine — a word
+// somebody typed into profiles.toml by hand — fails at the Connection
+// Registry with db.ErrEngineUnsupported rather than being dialled by whichever
+// adapter happened to be there.
 func New(profiles *db.ProfileStore, audit guard.AuditLog) *AppService {
 	return NewWithDrivers(profiles, db.Drivers{
-		db.EngineMySQL: db.NewMySQLDriver(),
-		db.EngineRedis: db.NewRedisDriver(),
+		db.EngineMySQL:   db.NewMySQLDriver(),
+		db.EngineRedis:   db.NewRedisDriver(),
+		db.EngineMongoDB: db.NewMongoDriver(),
 	}, audit, time.Now)
 }
 

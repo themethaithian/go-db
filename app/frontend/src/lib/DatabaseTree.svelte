@@ -48,10 +48,20 @@
   } from "./schema.svelte";
 
   // The label an Engine's own name reads as in prose — used only by the
-  // placeholder below, for the one Engine that can reach this tree without
-  // being introspectable (ADR-0006: Mongo has no picker option yet either).
+  // placeholder below, for an Engine that can reach this tree without being
+  // introspectable (ADR-0006: only MySQL has databases, tables and columns to
+  // list). Falls back to the raw Engine string for one this app does not
+  // know, the same fail-open-to-honesty posture the backend's own
+  // engineName takes.
   function engineLabel(engine: string): string {
-    return engine === "redis" ? "Redis" : engine;
+    switch (engine) {
+      case "redis":
+        return "Redis";
+      case "mongodb":
+        return "MongoDB";
+      default:
+        return engine;
+    }
   }
 
   let {

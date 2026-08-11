@@ -45,12 +45,8 @@
   let confirmingDelete = $state(false);
 
   // The Profile's Engine (ADR-0006), and each Engine's own default port.
-  // MongoDB is not offered here yet: it has no classifier of its own, so a
-  // Profile saved with that Engine could only ever be refused at the
-  // Approval Gate — it arrives once MongoDB gets its own ADR-0006 tasks
-  // (classifier, driver, editor grammar), not before.
   let engine = $state("mysql");
-  const ENGINE_DEFAULT_PORT: Record<string, number> = { mysql: 3306, redis: 6379 };
+  const ENGINE_DEFAULT_PORT: Record<string, number> = { mysql: 3306, redis: 6379, mongodb: 27017 };
 
   // Changing the Engine moves the port to its new default, but only when the
   // port on screen is still the previous Engine's own default — a port the
@@ -331,10 +327,7 @@
         >
           <option value="mysql">MySQL</option>
           <option value="redis">Redis</option>
-          <!-- MongoDB is deliberately absent: it has no classifier yet
-               (ADR-0006), so a Profile saved with that Engine could only
-               ever be refused at the Approval Gate. It joins this list once
-               MongoDB gets its own ADR-0006 tasks. -->
+          <option value="mongodb">MongoDB</option>
         </select>
       </label>
 
@@ -354,8 +347,24 @@
       </label>
 
       <label class="{labelClass} col-span-2">
-        Database
-        <input class={fieldClass} bind:value={database} placeholder="optional" />
+        <span class="flex items-center justify-between">
+          <span>Database</span>
+          {#if engine === "mongodb"}
+            <span class="font-normal text-text-subtle">required</span>
+          {/if}
+        </span>
+        <!-- Optional for MySQL and Redis, as it has always been; required
+             for MongoDB, because the adapter refuses to Open without one —
+             go-db's MongoDB grammar (db.<collection>.<verb>(...)) has no way
+             to name a database inline the way a qualified SQL table name
+             does, so there is nowhere for a statement to resolve without
+             this field. Caught here rather than left for Connect to refuse. -->
+        <input
+          class={fieldClass}
+          bind:value={database}
+          placeholder={engine === "mongodb" ? "" : "optional"}
+          required={engine === "mongodb"}
+        />
       </label>
 
       <label class="{labelClass} col-span-4">

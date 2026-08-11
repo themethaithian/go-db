@@ -18,9 +18,8 @@
 // views showing two result sets have two independent sets of dirty rows, and a
 // row index means nothing across them.
 
-import { untrack } from "svelte";
-import { CancelPending, RunQuery } from "../../wailsjs/go/app/App";
 import type { service } from "../../wailsjs/go/models";
+import { GateRun } from "./gate.svelte";
 import { buildUpdate, type CellValue } from "./mutate";
 
 /** One row's pending values, by column name. */
@@ -59,28 +58,26 @@ export class RowEdits {
   // "is this cell dirty" is a lookup rather than a comparison.
   #patches = $state<Record<number, RowPatch>>({});
 
-  // The statement the gate is holding right now, if the save has reached one,
-  // and its text. The text is kept because nobody typed it: a generated
-  // statement the human cannot read is one they cannot meaningfully confirm,
-  // and the result the gate hands back does not carry the SQL.
-  #pending = $state<service.QueryResult | null>(null);
-  #pendingSql = $state<string | null>(null);
-  #saving = $state(false);
-  #failure = $state<string | null>(null);
+  // One statement's trip through the gate, which is the same trip whatever
+  // built the statement (gate.svelte.ts). This class supplies the loop around
+  // it and the row bookkeeping either side; the withheld statement, the wait
+  // for the Inline Confirm and the cancelling of one nobody will answer all
+  // live in there, shared with the value editor that has the same need.
+  #gate = new GateRun();
 
-  // How the save loop waits for the human. Resolving with null means the
-  // confirm was abandoned rather than answered — the view went away, or the
-  // rows underneath it did.
-  #settle: ((outcome: service.QueryResult | null) => void) | null = null;
+  // Whether a save is running, which is the loop rather than one statement:
+  // the gate's own `running` goes false between two dirty rows, and a save bar
+  // that flickered off in that gap would be reporting the wrong thing.
+  #saving = $state(false);
 
   /** The withheld statement, for the view to raise an Inline Confirm on. */
   get pending(): service.QueryResult | null {
-    return this.#pending;
+    return this.#gate.pending;
   }
 
   /** That statement's text, to be shown with it. */
   get pendingSql(): string | null {
-    return this.#pendingSql;
+    return this.#gate.pendingSql;
   }
 
   /** Whether a save is in flight, including while it waits on a confirm. */
@@ -90,7 +87,7 @@ export class RowEdits {
 
   /** Why the last save stopped short, or null. */
   get failure(): string | null {
-    return this.#failure;
+    return this.#gate.failure;
   }
 
   /** How many cells are dirty — the number the save bar counts. */
@@ -150,7 +147,7 @@ export class RowEdits {
   /** Drops every edit, saved or not — the save bar's Revert, and every re-fetch. */
   revert() {
     this.#patches = {};
-    this.#failure = null;
+    this.#gate.clearFailure();
   }
 
   /**
@@ -162,7 +159,7 @@ export class RowEdits {
   async save(target: SaveTarget): Promise<number> {
     if (this.#saving) return 0;
     this.#saving = true;
-    this.#failure = null;
+    this.#gate.clearFailure();
     let executed = 0;
     try {
       for (const row of this.dirtyRows) {
@@ -170,36 +167,19 @@ export class RowEdits {
         try {
           statement = this.#statement(row, target);
         } catch (err) {
-          this.#failure = err instanceof Error ? err.message : String(err);
+          this.#gate.fail(err instanceof Error ? err.message : String(err));
           break;
         }
 
-        let outcome: service.QueryResult | null;
-        try {
-          outcome = await RunQuery(target.profileName, target.runIn ?? "", statement);
-        } catch (err) {
-          this.#failure = String(err);
-          break;
-        }
-
-        // The expected route: the gate withheld it, and the human answers in
-        // the Inline Confirm the view raises off `pending`.
-        if (outcome.status === "requires_confirmation" && outcome.pending_id && outcome.preview) {
-          this.#pendingSql = statement;
-          this.#pending = outcome;
-          outcome = await new Promise<service.QueryResult | null>((resolve) => {
-            this.#settle = resolve;
-          });
-          this.#pending = null;
-          this.#pendingSql = null;
-          this.#settle = null;
-        }
-
-        if (outcome === null || outcome.status === "cancelled") break;
-        if (outcome.status !== "executed") {
-          this.#failure = outcome.message;
-          break;
-        }
+        // Null is every ending but "it ran": cancelled, abandoned, refused, or
+        // failed. Which of those it was is already in `failure` when it was
+        // worth saying, so the loop only has to know that it stopped.
+        const outcome = await this.#gate.submit(
+          target.profileName,
+          target.runIn ?? "",
+          statement,
+        );
+        if (outcome === null) break;
         this.#forget(row);
         executed += 1;
       }
@@ -211,27 +191,15 @@ export class RowEdits {
 
   /** The Inline Confirm's answer, whichever way it went. */
   resolved(outcome: service.QueryResult) {
-    this.#settle?.(outcome);
+    this.#gate.resolved(outcome);
   }
 
   /**
    * Gives up on a confirm nobody is going to answer — the view is being torn
-   * down, or the rows it was built from have been fetched again. The gate is
-   * told, since an Inline Confirm has no expiry and a pending left behind is a
-   * statement the audit log never gets an outcome for.
-   *
-   * Callers reach for this on the way into a fetch, which is often inside an
-   * effect, so it reads the pending untracked: an effect that took a
-   * dependency on it here would re-run the moment a save raised one, and
-   * cancel the very confirm it had just put on screen.
+   * down, or the rows it was built from have been fetched again.
    */
   abandon() {
-    const pending = untrack(() => this.#pending);
-    if (pending?.pending_id) void CancelPending(pending.pending_id);
-    this.#pending = null;
-    this.#pendingSql = null;
-    this.#settle?.(null);
-    this.#settle = null;
+    this.#gate.abandon();
   }
 
   // One row's UPDATE: its dirty columns in the result's own order, matched on

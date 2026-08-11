@@ -36,6 +36,22 @@
   // it through RunQuery like any other statement: the gate withholds it, the
   // Inline Confirm below shows exactly what would run with its Impact Preview,
   // and nothing moves until the human says so.
+  //
+  // The same holds for the other two Engines' answers, one element at a time
+  // (mutateValue.ts). A browsed Redis key's hash field, list element, sorted
+  // set score or whole string value can be typed over, and a browsed MongoDB
+  // document can be edited or deleted whole — each producing exactly one
+  // statement, and each going the same way through RunQuery. This panel is
+  // where those affordances live because this is where the provenance is: the
+  // Profile, the database and the key or collection are the selection in the
+  // tree, unambiguously. A value that arrived in the Editor has no such
+  // provenance — its statement would have to be read backwards to find out
+  // which key it named — so the Editor's Value and Documents answers stay
+  // read-only, and say so where they render them.
+  //
+  // A confirmed write is followed by re-running the browse, so what the pane
+  // shows next is the database's own answer rather than this app's idea of
+  // what it should now hold.
   import { untrack } from "svelte";
   import DatabaseTree from "./DatabaseTree.svelte";
   import InlineConfirm from "./InlineConfirm.svelte";
@@ -82,7 +98,16 @@
     UNQUOTABLE_KEY,
   } from "./browse";
   import { RowEdits } from "./edits.svelte";
+  import { ValueEdits } from "./valueEdits.svelte";
   import { editability, qualify } from "./mutate";
+  import {
+    deleteKeyCommand,
+    deleteOneCommand,
+    removeCommand,
+    replaceOneCommand,
+    writeCommand,
+    type Slot,
+  } from "./mutateValue";
   import { CancelPending, RunQuery } from "../../wailsjs/go/app/App";
   import type { service } from "../../wailsjs/go/models";
 
@@ -114,6 +139,12 @@
   // answer for a key: whether a fetch is a re-read of what is already there.
   // A key's statement is not known until TYPE has been asked.
   let shownKey = $state<string | null>(null);
+  // What TYPE said that key holds, which is what says how to read the reply
+  // that came back — a flat array is a list's elements or a sorted set's
+  // members and scores depending only on this, and an edit addresses a
+  // different thing in each. Recorded from the fetch, like shownSql, so it
+  // describes what is on screen rather than what is selected.
+  let shownType = $state<string | null>(null);
 
   // The condition as it is being typed, which is not yet the condition in
   // force: it becomes browse.filter on Enter, and that is what re-runs the
@@ -140,6 +171,13 @@
   // view, not to the module: the Editor's grid has its own, and a row index
   // means nothing between two different result sets.
   const edits = new RowEdits();
+
+  // The edit open on one browsed value or document, which is the same idea one
+  // element at a time (valueEdits.svelte.ts). Two objects rather than one
+  // because they hold different things — a patch set against rows, an open box
+  // against an element — but they can never both be busy: a browse answer is
+  // rows, or a value, or documents, and never two of those at once.
+  const valueEdits = new ValueEdits();
 
   // Fetches are numbered so a slow one cannot overwrite a fast one started
   // later: clicking three tables quickly must leave the third one's rows on
@@ -182,10 +220,22 @@
   let pickedIndices = $derived(selectedRows.filter((index) => shownRows[index] !== undefined));
   let pickedRows = $derived(pickedIndices.map((index) => shownRows[index]));
 
-  // The statement a save is currently holding out for, if any. Read into a
-  // local so the panel that renders it and the props it is given are the same
-  // withheld statement, not two reads of a moving one.
-  let savePending = $derived(edits.pending);
+  // The statement a save is currently holding out for, if any — from either
+  // editor, since only one of them can ever have raised one. Read into a
+  // single local so the panel that renders it and the props it is given are
+  // the same withheld statement, not two reads of a moving one, and so the
+  // Inline Confirm below is written once rather than twice.
+  let confirming = $derived(
+    edits.pending !== null
+      ? { held: edits.pending, sql: edits.pendingSql, settle: (next: service.QueryResult) => edits.resolved(next) }
+      : valueEdits.pending !== null
+        ? {
+            held: valueEdits.pending,
+            sql: valueEdits.pendingSql,
+            settle: (next: service.QueryResult) => valueEdits.resolved(next),
+          }
+        : null,
+  );
 
   let filterDirty = $derived(filterInput.trim() !== browse.filter);
   // Comparing asks for more room than reading one row does, so the pane's
@@ -246,7 +296,10 @@
 
   // A confirm nobody will answer must not be left in the gate's queue: leaving
   // the Explorer unmounts this view, and an Inline Confirm has no expiry.
-  $effect(() => () => edits.abandon());
+  $effect(() => () => {
+    edits.abandon();
+    valueEdits.abandon();
+  });
 
   // The statement is the whole input to this view: whenever it changes — a
   // table picked in the tree, a condition applied, a limit chosen, or a
@@ -290,7 +343,10 @@
     loading = false;
     shownSql = "";
     shownKey = null;
+    shownType = null;
     selectedRows = [];
+    valueEdits.abandon();
+    valueEdits.reset();
   }
 
   // The box shows the condition in force: applying one normalises what is
@@ -322,8 +378,13 @@
     // on a confirm is a save for rows that are about to be replaced.
     edits.abandon();
     edits.revert();
+    // The document editor goes the same way: its open card is a card in a
+    // result set that is about to be replaced.
+    valueEdits.abandon();
+    valueEdits.reset();
     // Whatever is on screen is not a Redis key's value any more.
     shownKey = null;
+    shownType = null;
     // Rows from the table we were looking at a moment ago are worse than no
     // rows: they would sit under another table's name, or another condition.
     // They go the instant the statement changes — but re-running the same one
@@ -376,6 +437,8 @@
     selectedRows = [];
     edits.abandon();
     edits.revert();
+    valueEdits.abandon();
+    valueEdits.reset();
     // What is on screen belongs to the key that was selected a moment ago, and
     // leaving it under another key's name would be worse than showing nothing.
     // Re-reading the same key keeps it, so refresh does not blink — the same
@@ -399,6 +462,7 @@
         result = typed;
         failure = null;
         shownSql = typeCommand;
+        shownType = null;
         return;
       }
 
@@ -418,11 +482,16 @@
       result = next;
       failure = null;
       shownSql = readCommand;
+      // Recorded beside the statement it belongs to, and only once the read it
+      // describes has landed: a type set before the value arrived would tell
+      // the pane how to lay out a reply that is not there yet.
+      shownType = type;
     } catch (err) {
       if (request !== latestRequest) return;
       result = null;
       failure = String(err);
       shownSql = "";
+      shownType = null;
     } finally {
       if (request === latestRequest) loading = false;
     }
@@ -581,6 +650,75 @@
     }
   }
 
+  // One generated statement, through the gate, and then the read again.
+  //
+  // Everything the browse pane writes comes through here, whichever Engine and
+  // whichever affordance built it, because the sequence is the same for all of
+  // them and it is the sequence that matters: build (a refusal stops here and
+  // never reaches RunQuery), submit, wait for the Inline Confirm, and — only
+  // when it actually ran — re-read, so the pane shows the database's own answer
+  // rather than this app's idea of what it should now hold.
+  //
+  // A run that did not happen leaves the pane exactly as it was, box and all.
+  // That is what makes Cancel a way back: the draft lives in valueEdits, which
+  // outlives the confirm panel that unmounted the box while it was up.
+  async function runWrite(build: () => string) {
+    const profileName = selected.profile;
+    if (profileName === null) return;
+    const ran = await valueEdits.submit(profileName, build);
+    // The selection can move while a confirm is on screen; re-reading then
+    // would fetch the new selection under the old one's request number and
+    // land rows nobody asked for.
+    if (ran && selected.profile === profileName) refresh();
+  }
+
+  // The Redis affordances. The key they name is shownKey — the key whose value
+  // is on screen — rather than the selection, and the distinction is the same
+  // one shownSql makes for the caption: a write belongs to what is being looked
+  // at, not to what has just been clicked. The two agree except for the moment
+  // a fetch is in flight, and in that moment shownKey is the honest one, since
+  // it is the key shownType was recorded for and the elements were read with.
+  function writeElement(slot: Slot, text: string) {
+    const key = shownKey;
+    if (key === null) return;
+    void runWrite(() => writeCommand(key, slot, text));
+  }
+
+  function removeElement(slot: Slot) {
+    const key = shownKey;
+    if (key === null) return;
+    void runWrite(() => removeCommand(key, slot));
+  }
+
+  function deleteKey() {
+    const key = shownKey;
+    if (key === null) return;
+    void runWrite(() => deleteKeyCommand(key));
+  }
+
+  // The MongoDB affordances. The collection is the selection's own name, and
+  // the _id is the document's own — carried back from the card exactly as it
+  // arrived, so an ObjectId's {"$oid": "…"} round-trips rather than being
+  // rebuilt from something that looks like it.
+  function replaceDocument(id: unknown, document: unknown) {
+    const collection = selected.table;
+    if (collection === null) return;
+    void runWrite(() => replaceOneCommand(collection, id, document));
+  }
+
+  function deleteDocument(id: unknown) {
+    const collection = selected.table;
+    if (collection === null) return;
+    void runWrite(() => deleteOneCommand(collection, id));
+  }
+
+  // Whether the pane is showing a browsed Redis key's value — which is the one
+  // thing "Delete key" can honestly mean. A value the gate or the server
+  // answered with instead is not a key's contents.
+  let browsingKey = $derived(
+    engine === REDIS && shownKey !== null && result?.status === "ok" && result.value !== undefined,
+  );
+
   function resizeTree(next: number) {
     layout.explorerTreeWidth = clamp(next, TREE_MIN_PX, TREE_MAX_PX);
     persistLayout();
@@ -668,6 +806,35 @@
         </div>
         {/if}
 
+        <!-- Deleting the whole key is a pane-level action, not an element's,
+             so it sits with the pane's other pane-level buttons — and only
+             while a key's value is what the pane is showing. It is one
+             statement like every other affordance here, and goes the same way
+             through the gate. -->
+        {#if browsingKey}
+          <button
+            type="button"
+            class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-control border border-border bg-surface-raised px-2.5 text-base text-text-muted transition-colors hover:border-danger/50 hover:text-danger disabled:cursor-not-allowed disabled:text-text-subtle"
+            onclick={deleteKey}
+            disabled={valueEdits.saving}
+            title="DEL this key — the Approval Gate will ask first"
+          >
+            <svg
+              class="h-3.5 w-3.5"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M2.5 3.5h7M5 3.5V2.25h2V3.5M3.5 3.5l.4 6h4.2l.4-6" />
+            </svg>
+            Delete key
+          </button>
+        {/if}
+
         <button
           type="button"
           class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-control border border-border bg-surface-raised px-2.5 text-base text-text-muted transition-colors hover:border-border-strong hover:text-text"
@@ -716,15 +883,18 @@
 
     <div class="flex min-h-0 flex-1 flex-col p-3">
       <!-- A save in progress takes the whole panel, exactly as it does in the
-           Editor: one withheld UPDATE, its Impact Preview, and the two keys
-           that decide it. The grid comes back the moment it is answered. -->
-      {#if savePending !== null && savePending.pending_id && savePending.preview}
+           Editor: one withheld statement, its Impact Preview, and the two keys
+           that decide it. The pane comes back the moment it is answered —
+           holding whatever was typed into it, since the draft outlives this
+           panel (valueEdits.svelte.ts). Whichever editor raised it, it is
+           rendered once: the two can never both be withholding one. -->
+      {#if confirming !== null && confirming.held.pending_id && confirming.held.preview}
         <InlineConfirm
-          reason={savePending.classification.reason}
-          preview={savePending.preview}
-          pendingId={savePending.pending_id}
-          sql={edits.pendingSql}
-          onResolved={(next) => edits.resolved(next)}
+          reason={confirming.held.classification.reason}
+          preview={confirming.held.preview}
+          pendingId={confirming.held.pending_id}
+          sql={confirming.sql}
+          onResolved={confirming.settle}
         />
       {:else}
       <section
@@ -884,18 +1054,33 @@
             </p>
           </div>
         {:else if result.status === "ok" && result.documents !== undefined}
-          <!-- The Documents arm (ADR-0006). Same posture as the Value arm
-               below: the Explorer never builds a statement that returns one
-               — browsing always runs a SELECT — but rendering it here keeps
-               this panel honest with EditorView's. -->
-          <DocumentsView documents={result.documents} message={result.message} />
+          <!-- The Documents arm (ADR-0006) — what browsing a MongoDB
+               collection answers with. The cards are editable here because
+               this panel knows which collection they came from: it is the
+               selection in the tree, and every call built from it addresses
+               one document by its own _id. -->
+          <DocumentsView
+            documents={result.documents}
+            message={result.message}
+            edits={valueEdits}
+            collection={selected.table}
+            onReplace={replaceDocument}
+            onDelete={deleteDocument}
+          />
         {:else if result.status === "ok" && result.value !== undefined}
-          <!-- The Value arm (ADR-0006). In practice the Explorer never builds
-               a statement that returns one — browsing always runs a SELECT —
-               but rendering it here keeps this panel honest with EditorView's
-               rather than assuming Table is the only kind RunQuery can hand
+          <!-- The Value arm (ADR-0006) — what browsing a Redis key answers
+               with. The elements are editable here for the same reason the
+               documents above are: the key is the selection, and the type
+               TYPE reported is what says how to read the reply that came
                back. -->
-          <ValueView value={result.value} message={result.message} />
+          <ValueView
+            value={result.value}
+            message={result.message}
+            edits={valueEdits}
+            type={shownType}
+            onWrite={writeElement}
+            onRemove={removeElement}
+          />
         {:else if result.status === "ok"}
           <div class="flex min-h-0 min-w-0 flex-1" bind:clientWidth={bodyWidth}>
             <div class="flex min-w-0 flex-1">

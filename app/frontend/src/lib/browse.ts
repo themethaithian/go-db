@@ -53,8 +53,21 @@ export function browseTableSql(
  * turned into a call that would name a different collection.
  */
 export function browseMongoCollection(collection: string): string | null {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(collection)) return null;
+  if (!isPlainCollection(collection)) return null;
   return `db.${collection}.find({})`;
+}
+
+/**
+ * Whether this collection's name is one go-db's MongoDB grammar can write.
+ *
+ * The rule is the grammar's own identifier (see internal/mongoql/parse.go), and
+ * it is exported because every call the browse pane builds — the find that
+ * reads a collection and the replaceOne or deleteOne that writes one document
+ * of it — names the collection the same one way, and has the same one thing to
+ * say when it cannot.
+ */
+export function isPlainCollection(collection: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(collection);
 }
 
 /** The command that asks what kind of value a Redis key holds. */
@@ -102,14 +115,19 @@ export function redisReadCommand(key: string, type: string): string | null {
 }
 
 /**
- * A Redis key as one argument of a command line, or null for a key that cannot
- * be written as one.
+ * One argument of a command line — a key, a hash field, a member, a value —
+ * or null for text that cannot be written as one.
  *
  * The rules are the adapter's tokenizer, not an approximation of them (see
  * tokenizeRedisCommand in internal/db/redis.go), because the argument is the
  * whole thing at stake: a key with a space in it is a different key from two
  * keys, and a command built wrong would read — or in some other command,
  * change — something the human did not pick.
+ *
+ * It is the quoter for every command go-db writes, reads and writes alike:
+ * mutateValue.ts builds its SET, HSET, LSET, ZADD and DEL through this same
+ * function, because a value being written is the same kind of thing as a key
+ * being read — arbitrary bytes that have to survive the trip out as themselves.
  *
  * Double quotes, because that run is the one with escapes in it. Inside it the
  * tokenizer reads \xNN as one byte, \n \r \t \b \a as their characters, and any
@@ -120,18 +138,18 @@ export function redisReadCommand(key: string, type: string): string | null {
  * else is passed through: the tokenizer works in bytes and appends unknown ones
  * unchanged, so a UTF-8 name arrives as the same bytes it left as.
  *
- * The one key that cannot be written is one whose name is not text. Redis keys
- * are arbitrary bytes, and a key holding bytes that are not valid UTF-8 has
- * already lost them by the time it reaches this process — the backend's JSON
- * writes U+FFFD in their place — so a command built from it would name a
- * different key. That is refused rather than guessed at, and the caller shows
- * the refusal.
+ * The one argument that cannot be written is one that is not text. Redis keys
+ * and values are arbitrary bytes, and bytes that are not valid UTF-8 have
+ * already been lost by the time they reach this process — the backend's JSON
+ * writes U+FFFD in their place — so a command built from them would name a
+ * different key, or set a different value. That is refused rather than guessed
+ * at, and the caller shows the refusal.
  */
-export function quoteRedisArgument(key: string): string | null {
-  if (key.includes("�")) return null;
+export function quoteRedisArgument(argument: string): string | null {
+  if (argument.includes("�")) return null;
 
   let out = '"';
-  for (const character of key) {
+  for (const character of argument) {
     const code = character.codePointAt(0) ?? 0;
     if (character === '"' || character === "\\") {
       out += "\\" + character;

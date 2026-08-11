@@ -19,6 +19,7 @@
     Version,
   } from "../wailsjs/go/app/App";
   import type { app, guard } from "../wailsjs/go/models";
+  import { selected } from "./lib/schema.svelte";
 
   type View = "connections" | "explorer" | "editor" | "approvals";
 
@@ -52,8 +53,12 @@
   // A statement in transit from the Explorer to the Editor — the Explorer's
   // "Open in editor" is the one way a view hands work to another, so the
   // handover is a single value passed here and taken exactly once, rather
-  // than a shared editor document two views could fight over.
-  let editorSeed = $state<{ profile: string; sql: string } | null>(null);
+  // than a shared editor document two views could fight over. The database
+  // rides along with it (read from the Explorer's own selection, which
+  // ExplorerView's onOpenInEditor does not pass directly) so the tab the
+  // Editor opens is locked to the same schema the Explorer was browsing, not
+  // just the same Profile.
+  let editorSeed = $state<{ profile: string; sql: string; database: string } | null>(null);
 
   let statusText = $derived(
     connectedProfiles.length === 0
@@ -110,7 +115,7 @@
   }
 
   function openInEditor(profile: string, sql: string) {
-    editorSeed = { profile, sql };
+    editorSeed = { profile, sql, database: selected.database ?? "" };
     switchView("editor");
   }
 </script>

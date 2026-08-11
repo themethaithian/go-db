@@ -331,6 +331,20 @@ export function hasStructure(profileName: string | null): boolean {
   return engineOf(profileName) === MYSQL;
 }
 
+/**
+ * MYSQL / REDIS / MONGO — the short, uppercase word an engine badge shows
+ * beside a Profile, so the Explorer tree and the Connections list can tell
+ * three otherwise-identical-looking rows apart at a glance. Takes the raw
+ * Engine string rather than a Profile name so a caller that already has one
+ * (Connections' own Profile list, unlike the tree, needs no lookup here)
+ * does not have to round-trip it through engineOf first.
+ */
+export function engineLabel(engine: string): string {
+  if (engine === "redis") return "REDIS";
+  if (engine === "mongodb") return "MONGO";
+  return "MYSQL";
+}
+
 /** Expands or collapses a database, loading its tables the first time. */
 export function toggleDatabase(profileName: string, database: string) {
   const node = ensureDatabase(profileName, database);

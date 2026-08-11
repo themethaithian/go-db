@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { db } from "../../wailsjs/go/models";
   import { isGroupCollapsed, toggleGroupCollapsed } from "./profileGroups.svelte";
+  import { engineLabel } from "./schema.svelte";
 
   // Sidebar: lists saved Profiles and lets the user pick one to edit or
   // start a new one. Holds no domain state of its own — ConnectionsView owns
@@ -200,9 +201,19 @@
           aria-label={isConnected(profile) ? "Connected" : "Not connected"}
         ></span>
         <span class="truncate text-base font-medium text-text">{profile.Name}</span>
+        <!-- The Engine badge: MySQL included, since the point is telling
+             three otherwise-identical rows apart at a glance. Same pill
+             classes the ssh chip beside it already uses, and the same ones
+             the Explorer tree's Profile rows reuse in turn. -->
+        <span
+          class="ml-auto shrink-0 rounded-full border border-border bg-surface-raised px-1.5 text-xs font-medium tracking-wide text-text-muted uppercase"
+          title="Engine: {engineLabel(profile.Engine || 'mysql')}"
+        >
+          {engineLabel(profile.Engine || "mysql")}
+        </span>
         {#if profile.SSH}
           <span
-            class="ml-auto shrink-0 rounded-full border border-border bg-surface-raised px-1.5 text-xs font-medium tracking-wide text-text-muted uppercase"
+            class="shrink-0 rounded-full border border-border bg-surface-raised px-1.5 text-xs font-medium tracking-wide text-text-muted uppercase"
             title="Reached through an SSH tunnel"
           >
             ssh

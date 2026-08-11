@@ -42,6 +42,7 @@
   import { MONGODB, REDIS } from "./browse";
   import {
     databaseNode,
+    engineLabel,
     engineOf,
     hasStructure,
     isSystemDatabase,
@@ -664,6 +665,17 @@
               <path d="M2.75 8c0 1.24 2.35 2.25 5.25 2.25s5.25-1.01 5.25-2.25" />
             </svg>
             <span class="truncate text-base font-medium text-text">{profileName}</span>
+            <!-- The Engine badge: reuses ProfileList's pill classes, so the
+                 same rows read the same badge on both screens. Shown for
+                 every Profile, MySQL included — the point is telling three
+                 otherwise-identical rows apart at a glance, not flagging an
+                 exception. -->
+            <span
+              class="shrink-0 rounded-full border border-border bg-surface-raised px-1.5 text-xs font-medium tracking-wide text-text-muted uppercase"
+              title="Engine: {engineLabel(engineOf(profileName))}"
+            >
+              {engineLabel(engineOf(profileName))}
+            </span>
             {#if node.loading}
               <span class="ml-auto shrink-0 text-xs text-text-subtle">loading…</span>
             {:else if node.databases !== null}

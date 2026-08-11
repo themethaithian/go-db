@@ -11,7 +11,16 @@
 // What is deliberately not stored: results, classification, a pending Inline
 // Confirm. Those belong to a run, not to a document — a result set restored
 // from a week ago beside its query would be a screen that lies about what the
-// database holds now. Switching tabs clears them; only the SQL comes back.
+// database holds now. Switching tabs clears them; only the SQL, the Profile
+// and the database come back.
+//
+// The Profile and database are per document rather than one shared,
+// view-level choice, for the same reason the SQL is: a tab is a line of
+// enquiry against a particular connection, and two tabs are free to be two
+// different connections at once. EditorView reads and writes both through
+// this store rather than holding either itself, so switching tabs switches
+// which connection everything downstream — the language mode, the
+// completion schema, the database picker, Run itself — is talking about.
 //
 // There is always at least one document and activeId always names one of them.
 // Every reader depends on that, so both are re-established here — on a first
@@ -34,6 +43,22 @@ export type QueryDocument = {
    * wrong question with no sign that it had.
    */
   database: string;
+  /**
+   * The Profile this tab's statements run against — the other half of the
+   * same answer `database` is: which connection. null means none has been
+   * picked yet, which is a tab's normal starting state, not an error — the
+   * picker simply renders empty rather than guessing.
+   *
+   * It belongs to the document for the same reason `database` does: a tab
+   * left open on api-primary and a tab left open on api-replica are two
+   * different questions asked with the same SQL, and a shared, view-level
+   * "current Profile" is exactly what would let switching tabs answer the
+   * wrong one — which is the bug this field exists to close. A Profile
+   * deleted out from under a tab is not repaired to some other Profile here;
+   * the picker is left to render what null already renders, empty, rather
+   * than silently substituting a guess.
+   */
+  profile: string | null;
 };
 
 const STORAGE_KEY = "go-db:query-documents";
@@ -91,11 +116,20 @@ export const documents = {
  * Empty documents are never deduplicated that way, or + would stop making
  * tabs the moment one blank tab existed.
  *
- * A new tab inherits the database the human is working in — the + button
- * passes it — since a new line of enquiry is almost always about the same
- * schema as the one beside it.
+ * A new tab inherits the Profile and database the human is working in — the
+ * + button passes the active tab's own, and the Explorer's "Open in editor"
+ * passes the ones it was browsing — since a new line of enquiry is almost
+ * always about the same connection as the one beside it. Callers that pass
+ * neither (a saved query reopened by name, say) get a blank tab: null is a
+ * legitimate, ordinary starting point, not a state anything here works
+ * around.
  */
-export function openDocument(sql: string = "", name: string = nextName(), database: string = "") {
+export function openDocument(
+  sql: string = "",
+  name: string = nextName(),
+  database: string = "",
+  profile: string | null = null,
+) {
   if (sql !== "") {
     const existing = workspace.docs.find((doc) => doc.sql === sql);
     if (existing !== undefined) {
@@ -103,7 +137,7 @@ export function openDocument(sql: string = "", name: string = nextName(), databa
       return;
     }
   }
-  const doc: QueryDocument = { id: freshId(), name, sql, database };
+  const doc: QueryDocument = { id: freshId(), name, sql, database, profile };
   workspace.docs.push(doc);
   workspace.activeId = doc.id;
   persist();
@@ -128,7 +162,7 @@ export function closeDocument(id: string) {
 
   workspace.docs.splice(at, 1);
   if (workspace.docs.length === 0) {
-    const fresh: QueryDocument = { id: freshId(), name: nextName(), sql: "", database: "" };
+    const fresh: QueryDocument = { id: freshId(), name: nextName(), sql: "", database: "", profile: null };
     workspace.docs.push(fresh);
     workspace.activeId = fresh.id;
   } else if (workspace.activeId === id) {
@@ -157,12 +191,30 @@ export function writeSql(sql: string) {
   persist();
 }
 
-/** Records the database the front tab's statements run in. */
+/**
+ * Records the database the front tab's statements run in. Flushed straight
+ * to storage rather than going through the typing debounce above: a database
+ * pick is one discrete choice, not a run of keystrokes, so there is nothing
+ * to buffer it behind and no reason to risk losing it to a reload that lands
+ * in the debounce window.
+ */
 export function writeDatabase(database: string) {
   const doc = documents.active;
   if (doc.database === database) return;
   doc.database = database;
-  persist();
+  flush();
+}
+
+/**
+ * Records the Profile the front tab's statements run against. Same
+ * immediate-flush contract as writeDatabase, and for the same reason: a
+ * Profile pick is a discrete choice the human just made, not typing.
+ */
+export function writeProfile(profile: string | null) {
+  const doc = documents.active;
+  if (doc.profile === profile) return;
+  doc.profile = profile;
+  flush();
 }
 
 // Names count from the highest "Query N" in use rather than from the number of
@@ -203,6 +255,10 @@ function restore(): Workspace {
         // Tabs written before there was a database picker have none, and the
         // Profile's own connection is what they ran on.
         database: typeof entry.database === "string" ? entry.database : "",
+        // Tabs written before a Profile belonged to the tab (it used to be
+        // one shared, view-level choice) have none recorded either, and
+        // there is nothing honest to backfill it with but "not picked yet".
+        profile: typeof entry.profile === "string" ? entry.profile : null,
       });
     }
     if (docs.length === 0) return blank();
@@ -227,7 +283,7 @@ function isDocument(value: unknown): value is QueryDocument {
 }
 
 function blank(): Workspace {
-  const doc: QueryDocument = { id: freshId(), name: "Query 1", sql: "", database: "" };
+  const doc: QueryDocument = { id: freshId(), name: "Query 1", sql: "", database: "", profile: null };
   return { docs: [doc], activeId: doc.id };
 }
 
@@ -250,6 +306,7 @@ function flush() {
           name: doc.name,
           sql: doc.sql,
           database: doc.database,
+          profile: doc.profile,
         })),
         activeId: workspace.activeId,
       }),

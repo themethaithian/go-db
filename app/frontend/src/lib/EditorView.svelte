@@ -5,12 +5,13 @@
   // highlighting `orders` beside an editor now selecting from `users` is a
   // screen that lies.
   //
-  // The SQL itself is not held here. It belongs to the open documents
-  // (documents.svelte.ts), which outlive this component — a view is unmounted
-  // on every switch, and a query that vanished because someone glanced at the
-  // Approval Console was the old behaviour, not a design. What is held here is
-  // everything about the current run: classification, results, a pending
-  // Inline Confirm and the selected Profile. connectedProfiles is owned and
+  // The SQL is not held here, and neither are the Profile or database it runs
+  // against — all three belong to the open documents (documents.svelte.ts),
+  // which outlive this component — a view is unmounted on every switch, and a
+  // query (or the connection it was locked to) that vanished because someone
+  // glanced at the Approval Console was the old behaviour, not a design. What
+  // is held here is everything about the current run instead: classification,
+  // results, a pending Inline Confirm. connectedProfiles is owned and
   // refreshed by App.svelte and passed down, since it also drives the status
   // bar; the pane sizes live at module scope so they survive a trip elsewhere.
   //
@@ -45,6 +46,7 @@
     openDocument,
     renameDocument,
     writeDatabase,
+    writeProfile,
     writeSql,
   } from "./documents.svelte";
   import { deleteSaved, openSaved, saved, saveQuery } from "./saved.svelte";
@@ -75,27 +77,38 @@
   }: {
     connectedProfiles: string[];
     /** A statement handed over from another view (Explorer's "Open in editor"), or null. */
-    seed: { profile: string; sql: string } | null;
+    seed: { profile: string; sql: string; database: string } | null;
     onSeedConsumed: () => void;
     onGoToConnections: () => void;
   } = $props();
 
   // The seed is read once, and opens a tab of its own named after the table it
-  // reads — deliberately not watched, and never written over an existing
-  // document. Whatever the human has in their tabs is theirs; a handover is a
-  // new piece of work beside it, not a replacement for it. (This view is
-  // remounted on every entry, so "once" means "once per visit".)
+  // reads, locked to the Profile and database the Explorer was browsing —
+  // deliberately not watched, and never written over an existing document.
+  // Whatever the human has in their tabs is theirs; a handover is a new piece
+  // of work beside it, not a replacement for it. (This view is remounted on
+  // every entry, so "once" means "once per visit".)
   const handover = untrack(() => seed);
   if (handover !== null) {
-    openDocument(handover.sql, subjectTable(handover.sql) ?? undefined);
+    openDocument(
+      handover.sql,
+      subjectTable(handover.sql) ?? undefined,
+      handover.database,
+      handover.profile,
+    );
   }
-
-  let profileName = $state<string | null>(handover?.profile ?? null);
 
   // The document in front, and its text. Both are read-through: typing goes
   // back to the store, which is what makes it survive a view switch.
   let doc = $derived(documents.active);
   let sql = $derived(doc.sql);
+
+  // The Profile this tab's statements run against — read-through like `sql`
+  // and `database` below, not a view-level choice: switching tabs switches
+  // which Profile the picker, the badge, Run and everything downstream of it
+  // are talking about. Written only through writeProfile, which is what
+  // makes the change reach storage and outlive this view.
+  let profileName = $derived(doc.profile);
 
   // The schema this tab lives in: the database its statements run against, and
   // so the one an unqualified table name in them resolves in. It belongs to the
@@ -315,13 +328,19 @@
     if (next !== layout.editorDetailWidth) layout.editorDetailWidth = next;
   });
 
-  // If the selected Profile disconnects out from under the editor, fall back
-  // to no selection rather than silently running against a stale one.
-  $effect(() => {
-    if (profileName !== null && !connectedProfiles.includes(profileName)) {
-      profileName = null;
-    }
-  });
+  // Whether the tab's own Profile is actually reachable right now — connected,
+  // and (for a restored or handed-over tab) still a Profile that exists at
+  // all. Gates Run rather than clearing profileName on a disconnect: a
+  // Profile that drops mid-session, or one a restored tab named before it was
+  // ever reconnected this launch, is not the same thing as the human
+  // unpicking it, and overwriting the tab's own choice here would be a
+  // silent fallback to "no Profile" — the very thing a tab's Profile field
+  // exists to never do quietly. The picker renders empty on its own
+  // regardless — there is no <option> for a name absent from
+  // connectedProfiles — so nothing runs against it either
+  // way, and reconnecting the same Profile picks the tab back up without the
+  // human having to choose it again.
+  let profileConnected = $derived(profileName !== null && connectedProfiles.includes(profileName));
 
   // Where the statements in the buffer are, in the editor's own coordinates.
   // The gate does the splitting — it owns the MySQL grammar — and this is
@@ -403,7 +422,7 @@
   // behind the human's back.
   let confirmOpen = $derived(result?.status === "requires_confirmation");
   let canRun = $derived(
-    profileName !== null && target !== "" && !running && !confirmOpen && !edits.saving,
+    profileConnected && target !== "" && !running && !confirmOpen && !edits.saving,
   );
 
   async function run() {
@@ -688,13 +707,24 @@
         to run queries.
       </span>
     {:else}
+      <!-- The Profile this tab's statements run against. Per tab and
+           persisted with it — see documents.svelte.ts — so two tabs can be
+           two different connections at once. A plain value/onchange pair
+           rather than bind:value, like the database picker below: "" stands
+           in for null in the DOM only, translated back at the boundary,
+           since a <select>'s own value has no way to be null. A tab whose
+           Profile is not among connectedProfiles (deleted, or simply not
+           reconnected yet this launch) has no matching <option> here either,
+           so it renders exactly as "Select profile…" without this needing to
+           do anything about it. -->
       <label class="flex items-center gap-2 text-xs font-medium text-text-muted">
         Profile
         <select
           class="h-8 rounded-control border border-border bg-surface-raised px-2 text-base font-normal text-text transition-colors hover:border-border-strong"
-          bind:value={profileName}
+          value={profileName ?? ""}
+          onchange={(event) => writeProfile(event.currentTarget.value || null)}
         >
-          <option value={null} disabled selected={profileName === null}>Select profile…</option>
+          <option value="" disabled selected={profileName === null}>Select profile…</option>
           {#each connectedProfiles as name (name)}
             <option value={name}>{name}</option>
           {/each}
@@ -857,7 +887,7 @@
             class="my-1 ml-1 flex w-6 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-raised hover:text-text"
             title="New query tab"
             aria-label="New query tab"
-            onclick={() => openDocument(undefined, undefined, database)}
+            onclick={() => openDocument(undefined, undefined, database, profileName)}
           >
             <svg
               class="h-3 w-3"
@@ -1062,12 +1092,23 @@
           {:else if result.status === "ok" && result.documents !== undefined}
             <!-- The Documents arm (ADR-0006): a list of JSON documents in
                  place of the grid, for MongoDB. No RecordPaneDock here either
-                 — the same reason ValueView goes without one below. -->
+                 — the same reason ValueView goes without one below.
+
+                 Read-only, and the omitted props are the reason: both views
+                 can edit, given the collection or key their contents came
+                 from, and here nobody can say what that is. The Explorer's
+                 selection names one unambiguously; a buffer names one only
+                 inside a statement that would have to be read backwards to
+                 find it, and a wrong reading is a write to a collection the
+                 human was not looking at. Deriving that provenance from the
+                 statement is a later task — until it is done, editing lives
+                 where the provenance already does. -->
             <DocumentsView documents={result.documents} message={result.message} />
           {:else if result.status === "ok" && result.value !== undefined}
             <!-- The Value arm (ADR-0006): one Redis reply tree in place of the
                  grid. No RecordPaneDock here — picking rows is a table's own
-                 gesture, and a single typed value has nothing to pick. -->
+                 gesture, and a single typed value has nothing to pick. Read-
+                 only for the reason given above the Documents arm. -->
             <ValueView value={result.value} message={result.message} />
           {:else if result.status === "ok"}
             <div class="flex min-h-0 min-w-0 flex-1" bind:clientWidth={resultsWidth}>

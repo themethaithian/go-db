@@ -60,10 +60,22 @@
   // body starts with the fields rather than with a brace — which is why
   // JsonTree is asked for its `bare` rendering here.
   //
-  // `message` is the backend's own summary line ("3 documents.", "1
-  // document.") — shown in the footer, the same position and style
-  // ValueView's own footer occupies. The truncated pill beside it is
-  // ResultsTable's own notice, unchanged.
+  // `message` is the summary line — shown in the footer, the same position and
+  // style ValueView's own footer occupies. The Editor passes the backend's own
+  // ("3 documents.", "1 document."); the Explorer's collection pane passes its
+  // own, because a browse that asked for the first fifty knows something about
+  // its answer that the backend's count does not say (see CollectionBrowse).
+  // The truncated pill beside it is ResultsTable's own notice, unchanged, and
+  // `more` is the one affordance a caller may add there — the browse pane's
+  // Load more, which only it knows how to offer.
+  //
+  // Cards are cheap on purpose. A document's tree is rendered by JsonTree with
+  // its nested objects collapsed (expandDepth 1) and its leaves drawn inline
+  // rather than each as a component of its own, because this pane's job is to
+  // put fifty documents on screen at once and the old cost of doing that —
+  // roughly one component per field per document — is what made scrolling it
+  // stutter.
+  import type { Snippet } from "svelte";
   import CopyJson from "./CopyJson.svelte";
   import JsonTree from "./JsonTree.svelte";
   import {
@@ -87,6 +99,7 @@
   let {
     documents,
     message,
+    more = null,
     edits = null,
     collection = null,
     onReplace = null,
@@ -96,6 +109,8 @@
   }: {
     documents: Documents;
     message: string;
+    /** One affordance beside the summary line — the browse pane's Load more. */
+    more?: Snippet | null;
     /** The open editor and its draft. Null — the Editor — means read-only. */
     edits?: ValueEdits | null;
     /** The collection these documents were browsed from. */
@@ -378,6 +393,7 @@
                 <JsonTree
                   {value}
                   bare
+                  expandDepth={1}
                   edit={identity === null ? null : editing(value, identity.id)}
                 />
               </div>
@@ -408,6 +424,9 @@
       >
         truncated
       </span>
+    {/if}
+    {#if more !== null}
+      <div class="ml-auto shrink-0">{@render more()}</div>
     {/if}
   </div>
 </div>

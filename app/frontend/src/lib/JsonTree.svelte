@@ -39,12 +39,33 @@
   // text-syntax-number, booleans → text-syntax-keyword, null → text-subtle
   // italic, punctuation → text-subtle. No new colour is introduced.
   //
-  // Expansion defaults to the top DEFAULT_EXPANDED_DEPTH levels open and
-  // everything past that collapsed. A collapsed object/array never renders as
-  // nothing: it shows `{…} 5 keys` / `[…] 12 items`.
+  // Expansion defaults to the top `expandDepth` levels open and everything past
+  // that collapsed. A collapsed object/array never renders as nothing: it shows
+  // `{…} 5 keys` / `[…] 12 items`. The default is two levels; the Documents
+  // pane asks for one, because it stacks fifty of these at a time and the
+  // second level of fifty documents is a screenful nobody asked for.
   //
   // A string past STRING_TRUNCATE_AT truncates with its own "show more"
   // toggle rather than relying on a title attribute.
+  //
+  // ---------------------------------------------------------------------
+  // What this costs to mount
+  //
+  // Two rules keep a tree cheap, and both matter at fifty documents:
+  //
+  //   - A collapsed container renders its summary row and nothing else. Its
+  //     entries are behind the same {#if} as the braces, so a subtree nobody
+  //     has opened has never existed — not hidden with a class, not built and
+  //     then skipped.
+  //
+  //   - A leaf is drawn inline, in its parent's row, rather than as a JsonTree
+  //     of its own. A component per field is the cost that does not show up in
+  //     any one document and dominates fifty of them; the recursion is for the
+  //     values that genuinely need their own state — containers, which collapse,
+  //     and long strings, which carry their own "show more".
+  //
+  // So a document card costs one component for its root plus one per container
+  // field, rather than one per field of every level.
   //
   // ---------------------------------------------------------------------
   // Editing
@@ -91,6 +112,7 @@
     path = [],
     edit = null,
     bare = false,
+    expandDepth = 2,
   }: {
     value: unknown;
     depth?: number;
@@ -104,9 +126,14 @@
      * (DocumentsView). Only meaningful at the root.
      */
     bare?: boolean;
+    /**
+     * How many levels start expanded. Two for a reply the human asked one
+     * question to see; one for the Documents pane, which shows fifty answers at
+     * once. Passed down the recursion so one tree has one rule.
+     */
+    expandDepth?: number;
   } = $props();
 
-  const DEFAULT_EXPANDED_DEPTH = 2;
   const STRING_TRUNCATE_AT = 300;
 
   type Kind = "object" | "array" | "string" | "number" | "boolean" | "null";
@@ -123,6 +150,23 @@
 
   function isLeaf(v: unknown): boolean {
     return !(v !== null && typeof v === "object");
+  }
+
+  /**
+   * Whether a child needs a JsonTree of its own, or can be drawn inline in the
+   * row that names it.
+   *
+   * Only two kinds of value need one: a container, which has a collapsed state
+   * and entries of its own, and a long string, which carries its own "show
+   * more". Everything else — a short string, a number, a boolean, a null, and
+   * an extended-JSON wrapper, which renders as one compact leaf whatever it is
+   * technically made of — is a span, and a span does not need a component
+   * around it. See the mounting note at the top of this file.
+   */
+  function needsTree(v: unknown): boolean {
+    if (typeof v === "string") return v.length > STRING_TRUNCATE_AT;
+    if (v === null || typeof v !== "object") return false;
+    return recogniseExtended(v) === null;
   }
 
   // An extended-JSON wrapper is one value spelled across two levels, so it is
@@ -148,7 +192,7 @@
   // fight a click's own toggle.
   let expanded = $state(
     untrack(() => {
-      if (depth < DEFAULT_EXPANDED_DEPTH) return true;
+      if (depth < expandDepth) return true;
       if (edit === null) return false;
       const open = openFieldPath(edit.scope, edit.edits.open);
       return open !== null && underPath(path, open);
@@ -385,6 +429,33 @@
   {@render commitButtons(commit)}
 {/snippet}
 
+{#snippet inlineValue(child: unknown)}
+  <!-- One leaf, drawn where it sits. The markup is the same markup the
+       bottom of this file renders for a value of its own — same colours, same
+       break-all — because it is the same leaf; what it saves is the component
+       that used to be built around it, once per field per document. -->
+  {@const wrapper = recogniseExtended(child)}
+  {#if wrapper !== null}
+    <span
+      class="text-syntax-type break-all"
+      title="An extended JSON value — go-db does not edit one yet"
+    >
+      {wrapper.text}
+    </span>
+    {#if wrapper.tag !== null}
+      <span class="ml-1 text-xs text-text-subtle">{wrapper.tag}</span>
+    {/if}
+  {:else if typeof child === "string"}
+    <span class="text-syntax-string break-all">"{child}"</span>
+  {:else if typeof child === "number"}
+    <span class="tabular-nums text-syntax-number">{child}</span>
+  {:else if typeof child === "boolean"}
+    <span class="text-syntax-keyword">{String(child)}</span>
+  {:else}
+    <span class="text-text-subtle italic">null</span>
+  {/if}
+{/snippet}
+
 {#snippet entry(label: string, indexed: boolean, child: unknown, childPath: FieldPath)}
   {@const open = edit !== null && edit.edits.open === rowId(childPath)}
   {@const editable = edit !== null && isLeaf(child)}
@@ -399,10 +470,12 @@
     <div class="flex min-w-0 flex-1 items-center gap-1.5">
       {#if open}
         {@render valueBox(() => commitEdit(childPath), true)}
-      {:else}
+      {:else if needsTree(child)}
         <div class="min-w-0 flex-1">
-          <JsonTree value={child} depth={depth + 1} path={childPath} {edit} />
+          <JsonTree value={child} depth={depth + 1} path={childPath} {edit} {expandDepth} />
         </div>
+      {:else}
+        <div class="min-w-0 flex-1">{@render inlineValue(child)}</div>
       {/if}
     </div>
 

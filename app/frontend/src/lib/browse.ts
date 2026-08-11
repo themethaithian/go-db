@@ -21,6 +21,37 @@ export const MONGODB = "mongodb";
 const REDIS_BROWSE_LIMIT = 1000;
 
 /**
+ * How many documents a MongoDB collection browse reads, and the steps "Load
+ * more" walks up.
+ *
+ * It starts small on purpose. A collection browse used to ask for everything
+ * and let the adapter cap it at MaxRows, which meant a thousand documents came
+ * across the wire and a thousand cards were built before the pane could be
+ * scrolled — the first screenful of a browse costs a thousand documents'
+ * rendering whether or not anybody reads past the third one. Fifty is a
+ * screenful and a bit, and the rest is one press away.
+ *
+ * The steps are the grid's own row-limit ladder (BROWSE_LIMITS), and the last
+ * of them is MaxRows: the adapter caps a read there whatever this asks for, so
+ * a step past it would be a promise the backend does not keep.
+ */
+export const MONGO_BROWSE_STEPS = [50, 200, 500, 1000] as const;
+
+/** Where a fresh collection browse starts. */
+export const MONGO_BROWSE_FIRST = MONGO_BROWSE_STEPS[0];
+
+/** The most a collection browse will ever ask for — the backend's own MaxRows. */
+export const MONGO_BROWSE_CAP = MONGO_BROWSE_STEPS[MONGO_BROWSE_STEPS.length - 1];
+
+/** The next rung of the ladder, or null at the top of it. */
+export function nextMongoBrowseLimit(limit: number): number | null {
+  for (const step of MONGO_BROWSE_STEPS) {
+    if (step > limit) return step;
+  }
+  return null;
+}
+
+/**
  * The statement that browses one MySQL table: the qualified name, the
  * condition in force if there is one, and the row limit.
  *
@@ -41,8 +72,15 @@ export function browseTableSql(
 }
 
 /**
- * The call that browses one MongoDB collection: every document in it, which
- * the adapter caps for us exactly as LIMIT caps a SELECT.
+ * The call that browses one MongoDB collection: its first `limit` documents.
+ *
+ * It is an aggregate with a $limit rather than a find, because a find has no
+ * limit go-db can write — the grammar's find takes a filter and a projection,
+ * and the only bound on it is the adapter's own MaxRows. An aggregate carries
+ * the bound in the statement itself, where the human can read it in the caption
+ * and the classifier can see it: $limit is on the Approval Gate's list of
+ * aggregation stages proven to only read (internal/guard/mongo.go), so this
+ * browses through exactly the same guarded read path the find did.
  *
  * The collection is spliced in as a plain name because that is the only way
  * go-db's MongoDB grammar has of naming one — no quoting to get right, and no
@@ -52,9 +90,9 @@ export function browseTableSql(
  * anything but a dollar or a NUL), and it is refused cleanly here rather than
  * turned into a call that would name a different collection.
  */
-export function browseMongoCollection(collection: string): string | null {
+export function browseMongoCollection(collection: string, limit: number): string | null {
   if (!isPlainCollection(collection)) return null;
-  return `db.${collection}.find({})`;
+  return `db.${collection}.aggregate([{"$limit": ${Math.trunc(limit)}}])`;
 }
 
 /**

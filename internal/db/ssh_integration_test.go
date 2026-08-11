@@ -233,7 +233,7 @@ func (w bastionWorld) registry(t *testing.T, knownHosts string, profiles ...db.P
 	}
 
 	tunnels := &recordingTunnels{TunnelDialer: db.NewSSHTunnels(knownHosts)}
-	registry := db.NewRegistryWithTunnels(db.NewMySQLDriver(), tunnels, store)
+	registry := db.NewRegistryWithTunnels(db.Drivers{db.EngineMySQL: db.NewMySQLDriver()}, tunnels, store)
 	t.Cleanup(func() {
 		if err := registry.Close(); err != nil {
 			t.Errorf("closing the Connection Registry: %v", err)

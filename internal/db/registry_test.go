@@ -33,9 +33,21 @@ func directProfile(name string) db.Profile {
 	return db.Profile{Name: name, Host: directHost, Port: 3306, User: "root", Database: "app"}
 }
 
-// newRegistry returns a Registry over the given fakes, with profiles saved and
-// their secrets stored.
+// newRegistry returns a Registry over the given fake driver and fake tunnels,
+// with profiles saved and their secrets stored. These tests are not about
+// Engine selection, so every Profile here reaches driver as the Registry's
+// sole MySQL entry — which is what a Profile with no Engine set becomes once
+// saved, since ProfileStore normalizes it.
 func newRegistry(t *testing.T, driver *dbtest.FakeDriver, tunnels *dbtest.FakeTunnels, profiles ...db.Profile) *db.Registry {
+	t.Helper()
+	return newRegistryWithDrivers(t, db.Drivers{db.EngineMySQL: driver}, tunnels, profiles...)
+}
+
+// newRegistryWithDrivers is newRegistry with the Drivers map given directly:
+// the seam the Engine-selection tests use to hand two Profiles two different
+// fake Drivers, or to save a Profile whose Engine the map has no Driver for at
+// all.
+func newRegistryWithDrivers(t *testing.T, drivers db.Drivers, tunnels *dbtest.FakeTunnels, profiles ...db.Profile) *db.Registry {
 	t.Helper()
 
 	store := db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain())
@@ -43,9 +55,92 @@ func newRegistry(t *testing.T, driver *dbtest.FakeDriver, tunnels *dbtest.FakeTu
 		if err := store.Save(profile, "s3cret"); err != nil {
 			t.Fatalf("saving profile %q: %v", profile.Name, err)
 		}
-		driver.Accept(profile.Name, "s3cret")
+		engine := profile.Engine
+		if engine == "" {
+			engine = db.EngineMySQL // mirrors the normalization store.Save just did
+		}
+		if driver, ok := drivers[engine].(*dbtest.FakeDriver); ok {
+			driver.Accept(profile.Name, "s3cret")
+		}
 	}
-	return db.NewRegistryWithTunnels(driver, tunnels, store)
+	return db.NewRegistryWithTunnels(drivers, tunnels, store)
+}
+
+// engineProfile is a direct Profile pinned to a given Engine — the shape the
+// Engine-selection tests need, since directProfile always builds a
+// zero-Engine (so MySQL-normalized) one.
+func engineProfile(name string, engine db.Engine) db.Profile {
+	return db.Profile{Name: name, Host: directHost, Port: 3306, User: "root", Database: "app", Engine: engine}
+}
+
+// tunnelledEngineProfile is engineProfile reached through a bastion, for
+// proving a Driver miss fails before any tunnel is opened.
+func tunnelledEngineProfile(name string, engine db.Engine) db.Profile {
+	profile := engineProfile(name, engine)
+	profile.SSH = &db.SSHTunnel{Host: "bastion.example", Port: 22, User: "jump"}
+	return profile
+}
+
+// These tests pin how the Registry picks a Driver: a Profile's Engine chooses
+// which entry of the Drivers map dials it, and a Profile whose Engine has no
+// entry fails with ErrEngineUnsupported before anything else happens — no
+// tunnel opened, no other Driver touched, the Registry left exactly as it was.
+
+func TestConnectDialsTheDriverForTheProfilesEngine(t *testing.T) {
+	mysql, redis := dbtest.NewFakeDriver(), dbtest.NewFakeDriver()
+	tunnels := dbtest.NewFakeTunnels()
+	drivers := db.Drivers{db.EngineMySQL: mysql, db.EngineRedis: redis}
+	registry := newRegistryWithDrivers(t, drivers, tunnels, engineProfile("cache", db.EngineRedis))
+
+	if err := registry.Connect(context.Background(), "cache"); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	if redis.Opens() != 1 {
+		t.Errorf("the redis Driver opened %d connections, want 1", redis.Opens())
+	}
+	if mysql.Opens() != 0 {
+		t.Errorf("the mysql Driver opened %d connections, want 0: the Profile's Engine is redis", mysql.Opens())
+	}
+}
+
+func TestConnectWithNoDriverForTheEngineFailsBeforeDialling(t *testing.T) {
+	mysql := dbtest.NewFakeDriver()
+	tunnels := dbtest.NewFakeTunnels()
+	drivers := db.Drivers{db.EngineMySQL: mysql}
+	registry := newRegistryWithDrivers(t, drivers, tunnels, tunnelledEngineProfile("nosql", db.EngineMongoDB))
+
+	err := registry.Connect(context.Background(), "nosql")
+	if !errors.Is(err, db.ErrEngineUnsupported) {
+		t.Fatalf("Connect error = %v, want ErrEngineUnsupported", err)
+	}
+	if got := registry.Connected(); len(got) != 0 {
+		t.Errorf("Connected = %v after a Connect with no Driver for the Engine, want empty", got)
+	}
+	if mysql.Opens() != 0 {
+		t.Errorf("%d connections opened, want none: the Profile's Engine has no Driver", mysql.Opens())
+	}
+	if opened := tunnels.Opened(); len(opened) != 0 {
+		t.Errorf("opened %v tunnels, want none: ErrEngineUnsupported must fail before a tunnel is even asked for", opened)
+	}
+}
+
+func TestTestWithNoDriverForTheEngineFailsBeforeDialling(t *testing.T) {
+	mysql := dbtest.NewFakeDriver()
+	tunnels := dbtest.NewFakeTunnels()
+	drivers := db.Drivers{db.EngineMySQL: mysql}
+	registry := newRegistryWithDrivers(t, drivers, tunnels, tunnelledEngineProfile("nosql", db.EngineMongoDB))
+
+	err := registry.Test(context.Background(), "nosql")
+	if !errors.Is(err, db.ErrEngineUnsupported) {
+		t.Fatalf("Test error = %v, want ErrEngineUnsupported", err)
+	}
+	if opened := tunnels.Opened(); len(opened) != 0 {
+		t.Errorf("opened %v tunnels, want none: ErrEngineUnsupported must fail before a tunnel is even asked for", opened)
+	}
+	if mysql.Opens() != 0 {
+		t.Errorf("%d connections opened, want none: the Profile's Engine has no Driver", mysql.Opens())
+	}
 }
 
 func TestConnectWithoutSSHOpensNoTunnel(t *testing.T) {

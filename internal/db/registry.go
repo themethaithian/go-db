@@ -12,6 +12,24 @@ import (
 // connection for a Profile.
 var ErrNotConnected = errors.New("db: profile is not connected")
 
+// ErrEngineUnsupported reports that a Profile named an Engine the Connection
+// Registry has no Driver for. It is checked before anything is dialled — no
+// tunnel opened, no credentials touched — and it leaves the Registry exactly
+// as it was: this build simply does not carry the adapter this Profile's
+// Engine needs. A Profile with a zero Engine fails the same way rather than
+// being defaulted to MySQL here; ProfileStore normalizes that at the store
+// boundary, and a second normalization in the Registry would let the rule
+// drift between the two.
+var ErrEngineUnsupported = errors.New("db: no driver for engine")
+
+// Drivers maps an Engine to the Driver that dials it. It is the whole of how
+// the Connection Registry picks an adapter: a Profile names an Engine, the
+// map is consulted once, in open, and whatever Driver is behind that key
+// handles everything from there. A build that only ships MySQL carries a
+// one-entry map; nothing else about the Registry changes when a second
+// Engine's Driver is added to it.
+type Drivers map[Engine]Driver
+
 // Registry is the Connection Registry: the set of currently open connections,
 // keyed by Profile name and the schema each one is open on. Several are open at
 // once by design — the editor works on one Profile while the MCP server uses
@@ -40,8 +58,15 @@ var ErrNotConnected = errors.New("db: profile is not connected")
 // using and nobody can see. A sibling gets a tunnel of its own — correctness
 // before economy, since a tunnel shared between connections would outlive
 // whichever of them closed first and there is nowhere here to notice that.
+//
+// It picks a Driver by Engine, and nowhere else does: per ADR-0006 the
+// Registry itself is Engine-agnostic, and the Profile's Engine is the only
+// thing that decides which adapter dials it. That choice is made once, in
+// open, by looking the Engine up in the Drivers map it was built with; a
+// Profile whose Engine has no entry fails with ErrEngineUnsupported before
+// anything is dialled, rather than falling back to any particular Engine.
 type Registry struct {
-	driver   Driver
+	drivers  Drivers
 	tunnels  TunnelDialer
 	profiles *ProfileStore
 
@@ -64,10 +89,11 @@ type connKey struct {
 	database string
 }
 
-// NewRegistry returns an empty Registry that opens connections for the Profiles
-// in profiles through driver, tunnelling the ones that ask for it over SSH.
-func NewRegistry(driver Driver, profiles *ProfileStore) *Registry {
-	return NewRegistryWithTunnels(driver, nil, profiles)
+// NewRegistry returns an empty Registry that opens connections for the
+// Profiles in profiles, dialling each through whichever of drivers answers
+// for its Engine, and tunnelling the ones that ask for it over SSH.
+func NewRegistry(drivers Drivers, profiles *ProfileStore) *Registry {
+	return NewRegistryWithTunnels(drivers, nil, profiles)
 }
 
 // NewRegistryWithTunnels is NewRegistry with the tunnel dialler chosen: the
@@ -75,12 +101,12 @@ func NewRegistry(driver Driver, profiles *ProfileStore) *Registry {
 // test points the real one at a known_hosts file of its own. A nil tunnels
 // means the real SSH dialler verifying against ~/.ssh/known_hosts, which is
 // what the shipping binary gets.
-func NewRegistryWithTunnels(driver Driver, tunnels TunnelDialer, profiles *ProfileStore) *Registry {
+func NewRegistryWithTunnels(drivers Drivers, tunnels TunnelDialer, profiles *ProfileStore) *Registry {
 	if tunnels == nil {
 		tunnels = NewSSHTunnels("")
 	}
 	return &Registry{
-		driver:   driver,
+		drivers:  drivers,
 		tunnels:  tunnels,
 		profiles: profiles,
 		conns:    make(map[connKey]Conn),
@@ -305,13 +331,26 @@ func (r *Registry) Test(ctx context.Context, profileName string) error {
 // for one. The returned Conn owns whatever it needs to be closed with: closing
 // it closes the tunnel too, so no caller has to remember there was one.
 //
+// This is the one place the Registry chooses a Driver: profile.Engine is
+// looked up in drivers, and a miss fails with ErrEngineUnsupported before a
+// tunnel is opened or anything else about profile is touched. Profiles
+// reaching here always carry a concrete Engine — ProfileStore normalizes a
+// zero one to EngineMySQL before any caller sees it — but a zero Engine is
+// not treated as MySQL here either; it is simply another key the map does not
+// have, so the normalization rule stays owned by one package.
+//
 // A Profile with a tunnel fails as one thing. If the bastion refuses us the
 // database is never dialled, and if the database refuses us the tunnel is torn
 // down before the error is returned — an SSH session left behind by a failed
 // connect is a leak no later call could find.
 func (r *Registry) open(ctx context.Context, profile Profile, password string) (Conn, error) {
+	driver, ok := r.drivers[profile.Engine]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrEngineUnsupported, profile.Engine)
+	}
+
 	if profile.SSH == nil {
-		return r.driver.Open(ctx, profile, password, nil)
+		return driver.Open(ctx, profile, password, nil)
 	}
 
 	tunnel, err := r.tunnels.Open(ctx, *profile.SSH)
@@ -319,7 +358,7 @@ func (r *Registry) open(ctx context.Context, profile Profile, password string) (
 		return nil, err
 	}
 
-	conn, err := r.driver.Open(ctx, profile, password, tunnel.Dial)
+	conn, err := driver.Open(ctx, profile, password, tunnel.Dial)
 	if err != nil {
 		tunnel.Close() //nolint:errcheck // the connect already failed; the caller's error is the one worth reporting
 		return nil, err

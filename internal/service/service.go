@@ -55,7 +55,7 @@ func NewWithApproval(profiles *db.ProfileStore, driver db.Driver, tunnels db.Tun
 	}
 	return &AppService{
 		profiles: profiles,
-		registry: db.NewRegistryWithTunnels(driver, tunnels, profiles),
+		registry: db.NewRegistryWithTunnels(db.Drivers{db.EngineMySQL: driver}, tunnels, profiles),
 		pending:  guard.NewQueue(clock, timeout, timer),
 		audit:    audit,
 		clock:    clock,

@@ -18,6 +18,13 @@ var ErrProfileNotFound = errors.New("db: profile not found")
 // the Profile's key, so it cannot be empty.
 var ErrProfileNameRequired = errors.New("db: profile name is required")
 
+// ErrUnknownEngine reports a Profile saved with an Engine that is neither
+// unset nor one of the three go-db knows. An unset Engine is not this error —
+// it is normalized to EngineMySQL before the Profile is written — but a typo
+// or a future Engine this build does not understand must not silently reach
+// disk, where every later reader would trust it as though it were real.
+var ErrUnknownEngine = errors.New("db: unknown engine")
+
 const (
 	profilesFile = "profiles.toml"
 	dirPerm      = 0o700
@@ -65,6 +72,11 @@ func DefaultProfileDir() (string, error) {
 func (s *ProfileStore) Save(p Profile, password string) error {
 	if p.Name == "" {
 		return ErrProfileNameRequired
+	}
+	if p.Engine == "" {
+		p.Engine = EngineMySQL
+	} else if !p.Engine.Valid() {
+		return fmt.Errorf("%w: %q", ErrUnknownEngine, p.Engine)
 	}
 
 	s.mu.Lock()
@@ -174,6 +186,11 @@ type profileFile struct {
 
 // load reads the Profile list from disk, ordered by name. A store whose
 // directory or file does not exist yet holds no Profiles.
+//
+// This is the one place an empty Engine is normalized to EngineMySQL: a
+// profiles.toml written before Engine existed has no engine key at all, and
+// every caller of this package must see a concrete Engine rather than
+// re-deriving "empty means mysql" for itself.
 func (s *ProfileStore) load() ([]Profile, error) {
 	data, err := os.ReadFile(s.path())
 	if errors.Is(err, os.ErrNotExist) {
@@ -186,6 +203,11 @@ func (s *ProfileStore) load() ([]Profile, error) {
 	var file profileFile
 	if err := toml.Unmarshal(data, &file); err != nil {
 		return nil, fmt.Errorf("db: parsing profiles: %w", err)
+	}
+	for i := range file.Profiles {
+		if file.Profiles[i].Engine == "" {
+			file.Profiles[i].Engine = EngineMySQL
+		}
 	}
 	sortByName(file.Profiles)
 	return file.Profiles, nil

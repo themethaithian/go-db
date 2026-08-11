@@ -5,6 +5,16 @@ import (
 	"strconv"
 )
 
+// defaultRedisPort and defaultMongoDBPort are those Engines' usual ports,
+// following defaultMySQLPort's pattern (declared in mysql.go, the only
+// adapter that exists yet). They live here rather than beside an adapter of
+// their own because ADR-0006's Redis and MongoDB adapters do not exist yet;
+// Profile.Address needs a default today regardless.
+const (
+	defaultRedisPort   = 6379
+	defaultMongoDBPort = 27017
+)
+
 // Profile is a saved, named description of how to reach one database.
 // Profiles are the only way any Origin names a database: the MCP server pins
 // one explicitly, the editor selects one.
@@ -19,6 +29,12 @@ type Profile struct {
 	User     string `toml:"user"`
 	Database string `toml:"database,omitempty"`
 
+	// Engine is the kind of database this Profile reaches. It is written
+	// omitempty so a Profile that never sets it round-trips as no key at all
+	// rather than an explicit empty string; ProfileStore is what turns that
+	// absence into EngineMySQL, both on load and before it is written back.
+	Engine Engine `toml:"engine,omitempty"`
+
 	// SSH is the optional tunnel used to reach Host. Nil means a direct
 	// connection; otherwise Host is resolved and dialled on the bastion rather
 	// than here, so it may be a name that means nothing on this machine.
@@ -26,14 +42,29 @@ type Profile struct {
 }
 
 // Address returns the host:port this Profile is reached at, defaulting an
-// unset port to MySQL's 3306. It is how the Profile names its server anywhere
-// one is shown or dialled, so both agree.
+// unset port to its Engine's usual one — 3306 for MySQL (and for an unset
+// Engine, since ProfileStore normalizes that to MySQL before anything else
+// sees it), 6379 for Redis, 27017 for MongoDB. It is how the Profile names
+// its server anywhere one is shown or dialled, so both agree.
 func (p Profile) Address() string {
 	port := p.Port
 	if port == 0 {
-		port = defaultMySQLPort
+		port = defaultPort(p.Engine)
 	}
 	return net.JoinHostPort(p.Host, strconv.Itoa(port))
+}
+
+// defaultPort is the usual port for engine, used when a Profile does not
+// name one of its own.
+func defaultPort(engine Engine) int {
+	switch engine {
+	case EngineRedis:
+		return defaultRedisPort
+	case EngineMongoDB:
+		return defaultMongoDBPort
+	default:
+		return defaultMySQLPort
+	}
 }
 
 // SSHTunnel describes the jump host a Profile's connection is tunnelled

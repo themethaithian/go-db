@@ -25,13 +25,13 @@ var ErrUnreachable = errors.New("db: server unreachable")
 //
 // Which layer fires is per-Engine (ADR-0006), and the outcome is the same on
 // purpose. For MySQL it is the database: the statement ran inside a READ ONLY
-// transaction and the server refused it. For Redis there is no such
-// transaction, so the adapter is its own second layer and produces this from
-// its own check — it runs the Engine's classifier against the command line at
-// the connection, immediately before executing, and refuses a Mutation there.
-// A caller cannot tell the two apart, and has no reason to: either way a
-// statement believed to be a read turned out not to be, and it goes back to the
-// gate.
+// transaction and the server refused it. Redis and MongoDB have no such
+// transaction, so their adapters are their own second layer and produce this
+// from their own check — each runs its Engine's classifier against the
+// statement at the connection, immediately before executing, and refuses a
+// Mutation there. A caller cannot tell the two apart, and has no reason to:
+// either way a statement believed to be a read turned out not to be, and it
+// goes back to the gate.
 var ErrWriteAttempt = errors.New("db: the statement tried to write on the read path")
 
 // MaxRows is the most rows a ReadQuery returns. A desktop client renders what a

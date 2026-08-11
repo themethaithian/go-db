@@ -1,21 +1,23 @@
 package db
 
+import "encoding/json"
+
 // ResultKind names the shape a read came back in. It is the tag of the Result
 // union, and its vocabulary is fixed by ADR-0006: one kind per Engine's answer
 // shape, because the shape of results is part of what an Engine means.
 //
-// All three tags exist from the day the union does, even though Documents has
-// no payload yet. A caller that branches over the vocabulary now is a caller
-// the last Engine will not have to revisit; a caller that assumes Table is the
-// only tag is one that would silently render a document tree as an empty table.
+// All three tags exist from the day the union does. A caller that branches over
+// the vocabulary is a caller no Engine makes revisit; a caller that assumes
+// Table is the only tag is one that would silently render a document tree as an
+// empty table.
 type ResultKind string
 
 const (
 	// ResultTable is a flat columns-and-rows answer — SQL's shape, carried in
 	// the Table arm as the ResultSet that predates this union.
 	ResultTable ResultKind = "table"
-	// ResultDocuments is a list of JSON documents — MongoDB's shape. It has no
-	// payload type yet; it arrives with the MongoDB adapter.
+	// ResultDocuments is a list of JSON documents — MongoDB's shape, carried in
+	// the Documents arm as a DocumentSet.
 	ResultDocuments ResultKind = "documents"
 	// ResultValue is one typed reply tree — Redis's shape, carried in the Value
 	// arm as a Reply.
@@ -29,23 +31,23 @@ const (
 // documents and typed Redis replies fit in cells — a flattening that is lossy
 // both ways, and which the ADR rejects outright.
 //
-// Documents is still absent rather than stubbed, and for the reason the Value
-// arm no longer is: a payload type invented before the driver that fills it is
-// a guess, and the ADR is explicit that its shape comes from Mongo's documents
-// rather than from what seemed reasonable in advance. Value arrived with the
-// Redis adapter that fills it, which is when its shape stopped being a guess.
-// What the union must get right is the seam — every caller already asks which
-// arm it holds and handles being told "not that one" — so adding the last arm
-// adds a branch where a branch already is, and changes no existing call.
+// All three arms are here now, and each arrived with the adapter that fills it
+// rather than before it: a payload type invented ahead of its driver is a
+// guess, and the ADR is explicit that each shape comes from the Engine's own
+// answers rather than from what seemed reasonable in advance. What the union
+// had to get right was the seam — every caller asks which arm it holds and
+// handles being told "not that one" — so each arm added a branch where a branch
+// already was, and changed no existing call.
 //
 // The arms are unexported and reached through accessors on purpose. A Result
 // can only be built by one of this package's constructors, so a tag can never
 // disagree with the payload beside it, and the zero value is no arm at all
 // rather than a plausible-looking empty table.
 type Result struct {
-	kind  ResultKind
-	table ResultSet
-	value Reply
+	kind      ResultKind
+	table     ResultSet
+	documents DocumentSet
+	value     Reply
 }
 
 // TableResult tags rows as the Table arm. It is what an Engine whose answers
@@ -71,6 +73,82 @@ func (r Result) Table() (ResultSet, bool) {
 		return ResultSet{}, false
 	}
 	return r.table, true
+}
+
+// DocumentSet is one read's answer from an Engine that answers in documents,
+// and the Documents arm's payload.
+//
+// Each document is already-rendered JSON rather than a Go map, and that is the
+// point of the type. A document is nested and heterogeneous — the whole reason
+// ADR-0006 refuses to flatten one into table cells — so the only useful thing
+// to do with it is show it, and JSON is both what the renderer wants and what
+// the wire carries. Rendering once, here, means the same bytes the adapter read
+// off the server reach the screen, instead of being decoded into Go values and
+// guessed back into JSON by whoever serialises them.
+//
+// json.RawMessage rather than []byte is deliberate: a []byte is base64 on the
+// wire, and a document that arrives at the frontend as a base64 string is a
+// document nobody can render without decoding it again. A RawMessage is spliced
+// into the JSON as the object it already is.
+//
+// The documents are relaxed extended JSON. MongoDB writes two flavours, and the
+// difference is what happens to values JSON can carry on its own: canonical
+// wraps every one of them in its BSON type, so the integer 1 is written
+// {"$numberInt": "1"} and a date is {"$date": {"$numberLong": "…"}}, while
+// relaxed writes 1 and "2020-01-01T00:00:00Z" and reserves the $-wrappers for
+// the types JSON genuinely has no syntax for — $oid, $binary, $regularExpression
+// and the rest. Relaxed is chosen for two reasons. It is what a human reads: a
+// document view where every number is a two-key object is a view of the
+// encoding rather than of the data. And it is what a human wrote: go-db's
+// MongoDB grammar takes plain JSON and passes $-wrapped extended JSON through
+// untouched (see internal/mongoql), so a document rendered relaxed comes back
+// looking like the filter that found it.
+//
+// What relaxed gives up is numeric width — an int32, an int64 and a double that
+// all hold 1 are all written 1, and reading the document back would make them
+// one type. That is a real loss, and it is the right one to take: nothing in
+// this client round-trips a document through the editor, the width is not shown
+// anywhere, and the alternative makes every ordinary document unreadable to buy
+// a distinction nobody is looking at.
+type DocumentSet struct {
+	// Documents are the documents read, in the order the server sent them.
+	Documents []json.RawMessage `json:"documents"`
+	// Truncated reports that the answer was cut off at MaxRows and there was
+	// more to come. It carries ResultSet.Truncated's meaning exactly.
+	Truncated bool `json:"truncated"`
+}
+
+// DocumentsResult tags documents as the Documents arm. It is what an Engine
+// whose answers are documents returns from Conn.ReadQuery — today, MongoDB.
+//
+// truncated says the answer was cut at MaxRows, and MaxRows is the cap for the
+// same reason it caps a table: a desktop client renders what a human reads, the
+// performance budget is a feature, and a find with no filter over a collection
+// of millions is the unbounded SELECT in different syntax. A result cut short
+// says so, so the documents on screen are never mistaken for the whole answer.
+//
+// No documents is an empty list rather than an absent one. The arm is lifted
+// out and serialised for a renderer that will iterate it, and a null where a
+// list belongs is a crash rather than an empty result — so a nil slice is
+// normalised here, once, instead of at every caller.
+func DocumentsResult(documents []json.RawMessage, truncated bool) Result {
+	if documents == nil {
+		documents = []json.RawMessage{}
+	}
+	return Result{kind: ResultDocuments, documents: DocumentSet{Documents: documents, Truncated: truncated}}
+}
+
+// Documents returns the Documents arm's documents, and whether this Result is
+// that arm.
+//
+// The second return carries Table's weight: a caller handed the wrong arm has
+// been given an answer it cannot render, and being told so is how it finds out
+// rather than drawing a blank.
+func (r Result) Documents() (DocumentSet, bool) {
+	if r.kind != ResultDocuments {
+		return DocumentSet{}, false
+	}
+	return r.documents, true
 }
 
 // ValueResult tags reply as the Value arm. It is what an Engine whose answers

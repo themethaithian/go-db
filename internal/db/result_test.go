@@ -129,6 +129,106 @@ func TestAReplyIsSerialisable(t *testing.T) {
 	}
 }
 
+func TestDocumentsResultCarriesItsDocuments(t *testing.T) {
+	documents := []json.RawMessage{
+		json.RawMessage(`{"_id":{"$oid":"507f1f77bcf86cd799439011"},"name":"a"}`),
+		json.RawMessage(`{"name":"b","n":2}`),
+	}
+
+	result := db.DocumentsResult(documents, true)
+
+	if got := result.Kind(); got != db.ResultDocuments {
+		t.Errorf("Kind() = %q, want %q", got, db.ResultDocuments)
+	}
+	got, ok := result.Documents()
+	if !ok {
+		t.Fatal("Documents() reported the arm absent, want the documents it was built from")
+	}
+	if len(got.Documents) != 2 {
+		t.Fatalf("Documents = %d, want the two it was built from", len(got.Documents))
+	}
+	if string(got.Documents[1]) != `{"name":"b","n":2}` {
+		t.Errorf("Documents[1] = %s, want the document's own bytes", got.Documents[1])
+	}
+	if !got.Truncated {
+		t.Error("Truncated = false, want the cap to survive the wrapping")
+	}
+}
+
+// TestDocumentsResultHasNoDocumentsRatherThanNone pins the one thing the
+// constructor normalises. The arm is lifted out and serialised for a renderer
+// that iterates it, and a null where a list belongs is a crash rather than an
+// empty result.
+func TestDocumentsResultHasNoDocumentsRatherThanNone(t *testing.T) {
+	got, ok := db.DocumentsResult(nil, false).Documents()
+	if !ok {
+		t.Fatal("Documents() reported the arm absent on a Result tagged documents")
+	}
+	if got.Documents == nil {
+		t.Fatal("Documents = nil, want an empty list — no documents is an answer, and it has to survive being sent")
+	}
+
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshalling an empty DocumentSet: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"documents":[]`) {
+		t.Errorf("encoded = %s, want an empty list rather than a null", encoded)
+	}
+}
+
+// TestADocumentSetIsSerialisable pins the promise the wire task depends on: the
+// service lifts a DocumentSet out of the Documents arm the way it lifts a
+// ResultSet out of the Table arm, and what it lifts out has to survive being
+// sent.
+//
+// The load-bearing half is that a document is spliced in as the object it
+// already is. Carrying the documents as []byte would base64 them, and a
+// frontend handed a base64 string has a document it cannot render without
+// decoding it a second time.
+func TestADocumentSetIsSerialisable(t *testing.T) {
+	set, _ := db.DocumentsResult([]json.RawMessage{
+		json.RawMessage(`{"_id":{"$oid":"507f1f77bcf86cd799439011"},"n":1,"tags":["a","b"],"nested":{"k":null}}`),
+	}, true).Documents()
+
+	encoded, err := json.Marshal(set)
+	if err != nil {
+		t.Fatalf("marshalling a DocumentSet: %v", err)
+	}
+	if strings.Contains(string(encoded), `"documents":["`) {
+		t.Fatalf("encoded = %s, want the document spliced in as an object rather than quoted or base64", encoded)
+	}
+
+	var decoded struct {
+		Documents []struct {
+			ID     map[string]string `json:"_id"`
+			N      int               `json:"n"`
+			Tags   []string          `json:"tags"`
+			Nested map[string]any    `json:"nested"`
+		} `json:"documents"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshalling a DocumentSet: %v", err)
+	}
+	if len(decoded.Documents) != 1 {
+		t.Fatalf("decoded %d documents, want 1", len(decoded.Documents))
+	}
+	document := decoded.Documents[0]
+	if document.ID["$oid"] != "507f1f77bcf86cd799439011" {
+		t.Errorf("_id = %v, want the extended-JSON object id to survive as an object", document.ID)
+	}
+	if document.N != 1 || len(document.Tags) != 2 {
+		t.Errorf("document = %+v, want its scalars and its array", document)
+	}
+	if value, present := document.Nested["k"]; !present || value != nil {
+		t.Errorf("nested = %v, want an explicit null to stay an explicit null", document.Nested)
+	}
+	if !decoded.Truncated {
+		t.Error("Truncated = false, want the cut marker to survive being sent")
+	}
+}
+
 // TestAnArmRefusesToBeAnother is the half that keeps a caller honest. A Result
 // holding a Redis reply handed to code written for SQL must say so, or the code
 // draws an empty grid and calls it the database's answer.
@@ -136,8 +236,20 @@ func TestAnArmRefusesToBeAnother(t *testing.T) {
 	if _, ok := db.TableResult(db.ResultSet{}).Value(); ok {
 		t.Error("Value() answered a Table Result, want it refused")
 	}
+	if _, ok := db.TableResult(db.ResultSet{}).Documents(); ok {
+		t.Error("Documents() answered a Table Result, want it refused")
+	}
 	if _, ok := db.ValueResult(db.Reply{Kind: db.ReplyNil}).Table(); ok {
 		t.Error("Table() answered a Value Result, want it refused")
+	}
+	if _, ok := db.ValueResult(db.Reply{Kind: db.ReplyNil}).Documents(); ok {
+		t.Error("Documents() answered a Value Result, want it refused")
+	}
+	if _, ok := db.DocumentsResult(nil, false).Table(); ok {
+		t.Error("Table() answered a Documents Result, want it refused")
+	}
+	if _, ok := db.DocumentsResult(nil, false).Value(); ok {
+		t.Error("Value() answered a Documents Result, want it refused")
 	}
 }
 
@@ -155,6 +267,9 @@ func TestZeroResultIsNoArm(t *testing.T) {
 	}
 	if _, ok := result.Value(); ok {
 		t.Error("Value() answered the zero Result, want it refused")
+	}
+	if _, ok := result.Documents(); ok {
+		t.Error("Documents() answered the zero Result, want it refused")
 	}
 }
 

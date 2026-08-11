@@ -415,9 +415,14 @@ var (
 	redisContainer string // container name, empty when nothing was started
 )
 
+// TestMain stops every throwaway container this package's integration tests
+// started. It lives here because it is one per package and this is the file
+// that first needed one; the MongoDB tests beside it hang their own teardown
+// off it rather than declaring a second.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	stopRedisContainer()
+	stopMongoContainer()
 	os.Exit(code)
 }
 

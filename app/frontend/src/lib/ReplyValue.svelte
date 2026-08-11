@@ -8,16 +8,37 @@
   // left border and one indent, so the tree reads the way MaxReplyDepth
   // already bounds it: the recursion cannot run away because the server
   // never hands over more than 16 levels.
+  //
+  // A string leaf that parses as JSON (jsonReply.ts — object/array-shaped
+  // text only, so a plain numeric string is never hijacked) grows its own
+  // small Raw | JSON toggle and, in JSON mode, hands off to JsonTree —
+  // RedisInsight's own behaviour for a hash field or list element that
+  // happens to hold a JSON payload. `mode` lives at this component's own
+  // scope, so it is scoped to the one reply this instance renders: two
+  // sibling entries in the same map never share or fight over each other's
+  // toggle state, the same way each recursive instance already owns its own
+  // `expanded`-style state would if it needed any.
   import type { db } from "../../wailsjs/go/models";
   // A component may import its own file to recurse — Svelte 5's
   // replacement for <svelte:self>.
   import ReplyValue from "./ReplyValue.svelte";
+  import JsonTree from "./JsonTree.svelte";
+  import RawJsonToggle from "./RawJsonToggle.svelte";
+  import { parseJsonReply, JSON_REPLY_THRESHOLD } from "./jsonReply";
 
   let { reply, depth = 0 }: { reply: db.Reply; depth?: number } = $props();
 
   function isContainer(kind: string): boolean {
     return kind === "array" || kind === "map";
   }
+
+  let jsonValue = $derived(reply.kind === "string" ? parseJsonReply(reply.text ?? "") : undefined);
+
+  let mode = $state<"raw" | "json">("raw");
+  $effect(() => {
+    const text = reply.text ?? "";
+    mode = jsonValue !== undefined && text.length >= JSON_REPLY_THRESHOLD ? "json" : "raw";
+  });
 
   // The text a scalar shows. Kind decides which field is meaningful — see
   // db.Reply's own doc comment on why reading the wrong one is unsafe —
@@ -48,6 +69,17 @@
     <span class="text-danger">{scalarText(node)}</span>
   {:else if node.kind === "integer" || node.kind === "double"}
     <span class="tabular-nums text-text">{scalarText(node)}</span>
+  {:else if node.kind === "string" && jsonValue !== undefined}
+    <div class="flex flex-col items-start gap-1">
+      <RawJsonToggle bind:mode />
+      {#if mode === "json"}
+        <div class="w-full overflow-x-auto rounded-control border border-border/60 bg-surface">
+          <JsonTree value={jsonValue} />
+        </div>
+      {:else}
+        <span class="text-text break-all">{scalarText(node)}</span>
+      {/if}
+    </div>
   {:else}
     <span class="text-text">{scalarText(node)}</span>
   {/if}

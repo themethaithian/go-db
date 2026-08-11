@@ -16,33 +16,39 @@
   // value that document's JSON held — a plain object, for every document
   // this app renders. The local Documents type below says what actually
   // crosses the boundary rather than repeating the generated (and
-  // misleading) one; renderDocument still copes if a raw JSON string ever
+  // misleading) one; documentValue still copes if a raw JSON string ever
   // arrives instead, as a defensive fallback rather than the expected path.
   //
-  // Each document gets one card: its JSON, pretty-printed at 2-space indent
-  // in the results grid's own mono font (ResultsTable, ReplyValue). No
-  // syntax colouring — a document is not code, and plain mono reads as
-  // clearly as anything trivial to add here would (muted keys vs. values is
-  // not worth the CSS for a JSON.stringify block with no key/value markup of
-  // its own to hang a class on).
+  // Each document gets one card: its JSON as an interactive JsonTree
+  // (syntax colour, collapsible nesting, per-document copy) rather than a
+  // flat pretty-printed block — the same tree ReplyValue's own Raw | JSON
+  // toggle renders for a Redis string that turns out to hold JSON, so
+  // "readable JSON" means one thing across both Engines.
   //
   // `message` is the backend's own summary line ("3 documents.", "1
   // document.") — shown in the footer, the same position and style
   // ValueView's own footer occupies. The truncated pill beside it is
   // ResultsTable's own notice, unchanged.
+  import JsonTree from "./JsonTree.svelte";
+
   type Documents = { documents: unknown[]; truncated: boolean };
 
   let { documents, message }: { documents: Documents; message: string } = $props();
 
-  function renderDocument(doc: unknown): string {
-    if (typeof doc === "string") {
-      try {
-        return JSON.stringify(JSON.parse(doc), null, 2);
-      } catch {
-        return doc;
-      }
+  // The value JsonTree renders for one document. `doc` is normally already
+  // the parsed object — see the module comment above for why
+  // json.RawMessage's own MarshalJSON hands this component an
+  // already-parsed value rather than a string to parse itself. The string
+  // branch below is the defensive fallback for a raw JSON string arriving
+  // instead: parsed if it holds valid JSON, handed through as-is (JsonTree
+  // then renders it as the string it is) if it does not.
+  function documentValue(doc: unknown): unknown {
+    if (typeof doc !== "string") return doc;
+    try {
+      return JSON.parse(doc);
+    } catch {
+      return doc;
     }
-    return JSON.stringify(doc, null, 2);
   }
 </script>
 
@@ -56,10 +62,9 @@
     <div class="min-h-0 flex-1 overflow-auto">
       <div class="flex flex-col gap-2 p-3">
         {#each documents.documents as doc, i (i)}
-          <pre
-            class="overflow-x-auto rounded-control border border-border bg-surface px-3 py-2 font-mono text-sm text-text">{renderDocument(
-              doc,
-            )}</pre>
+          <div class="overflow-x-auto rounded-control border border-border bg-surface py-1">
+            <JsonTree value={documentValue(doc)} />
+          </div>
         {/each}
       </div>
     </div>

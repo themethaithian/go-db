@@ -1,6 +1,8 @@
 package db_test
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/themethaithian/go-db/internal/db"
@@ -41,9 +43,107 @@ func TestTableResultCarriesItsRows(t *testing.T) {
 	}
 }
 
+func TestValueResultCarriesItsReply(t *testing.T) {
+	reply := db.Reply{
+		Kind: db.ReplyArray,
+		Items: []db.Reply{
+			{Kind: db.ReplyString, Text: "one"},
+			{Kind: db.ReplyNil},
+		},
+		Truncated: true,
+	}
+
+	result := db.ValueResult(reply)
+
+	if got := result.Kind(); got != db.ResultValue {
+		t.Errorf("Kind() = %q, want %q", got, db.ResultValue)
+	}
+	got, ok := result.Value()
+	if !ok {
+		t.Fatal("Value() reported the arm absent, want the reply it was built from")
+	}
+	if got.Kind != db.ReplyArray || len(got.Items) != 2 {
+		t.Fatalf("reply = %#v, want the two-element array it was built from", got)
+	}
+	if got.Items[0].Text != "one" || got.Items[1].Kind != db.ReplyNil {
+		t.Errorf("items = %#v, want a string then a nil — a nil reply is not an empty string", got.Items)
+	}
+	if !got.Truncated {
+		t.Error("Truncated = false, want the cap to survive the wrapping")
+	}
+}
+
+// TestAReplyIsSerialisable pins the promise the wire task depends on: the
+// service lifts a Reply out of the Value arm the way it lifts a ResultSet out
+// of the Table arm, and what it lifts out has to survive being sent.
+//
+// The two halves are the tag and the absences. Kind is always written, because
+// it is the only honest way to read a node — and the scalar fields are
+// omitempty, so a zero integer and a false boolean are absent rather than
+// present as zeroes. That is safe in exactly one reading order, and this test
+// is where it is written down: take the kind, then the field it names, and
+// treat an absent field as its zero value.
+func TestAReplyIsSerialisable(t *testing.T) {
+	reply := db.Reply{
+		Kind: db.ReplyMap,
+		Entries: []db.ReplyEntry{
+			{Key: db.Reply{Kind: db.ReplyString, Text: "count"}, Value: db.Reply{Kind: db.ReplyInteger}},
+			{Key: db.Reply{Kind: db.ReplyString, Text: "flag"}, Value: db.Reply{Kind: db.ReplyBoolean}},
+			{Key: db.Reply{Kind: db.ReplyString, Text: "items"}, Value: db.Reply{
+				Kind:      db.ReplyArray,
+				Items:     []db.Reply{{Kind: db.ReplyNil}, {Kind: db.ReplyDouble, Double: 1.5}, {Kind: db.ReplyError, Text: "WRONGTYPE"}},
+				Truncated: true,
+			}},
+		},
+	}
+
+	encoded, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatalf("marshalling a Reply: %v", err)
+	}
+
+	var decoded db.Reply
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshalling a Reply: %v", err)
+	}
+	if decoded.Kind != db.ReplyMap || len(decoded.Entries) != 3 {
+		t.Fatalf("decoded = %#v, want the three-entry map it was built from", decoded)
+	}
+
+	zeroInteger := decoded.Entries[0].Value
+	if zeroInteger.Kind != db.ReplyInteger || zeroInteger.Integer != 0 {
+		t.Errorf("the zero integer decoded as %#v, want an integer reading 0", zeroInteger)
+	}
+	// The kind is written as "kind":"integer"; what must be absent is the
+	// field, "integer":0.
+	if strings.Contains(string(encoded), `"integer":`) {
+		t.Errorf("encoded = %s, want a zero integer left out rather than written", encoded)
+	}
+
+	items := decoded.Entries[2].Value
+	if !items.Truncated || len(items.Items) != 3 || items.Items[0].Kind != db.ReplyNil {
+		t.Errorf("the array decoded as %#v, want its cut marker and its three elements", items)
+	}
+	if items.Items[2].Kind != db.ReplyError || items.Items[2].Text != "WRONGTYPE" {
+		t.Errorf("the nested error decoded as %#v, want an error carried as a value", items.Items[2])
+	}
+}
+
+// TestAnArmRefusesToBeAnother is the half that keeps a caller honest. A Result
+// holding a Redis reply handed to code written for SQL must say so, or the code
+// draws an empty grid and calls it the database's answer.
+func TestAnArmRefusesToBeAnother(t *testing.T) {
+	if _, ok := db.TableResult(db.ResultSet{}).Value(); ok {
+		t.Error("Value() answered a Table Result, want it refused")
+	}
+	if _, ok := db.ValueResult(db.Reply{Kind: db.ReplyNil}).Table(); ok {
+		t.Error("Table() answered a Value Result, want it refused")
+	}
+}
+
 // TestZeroResultIsNoArm pins the zero value. It is not an empty table — an
 // empty table is a real answer, and a Result nobody filled in is not one — so
-// Table() must refuse it rather than hand back a blank ResultSet.
+// the accessors must refuse it rather than hand back a blank payload.
 func TestZeroResultIsNoArm(t *testing.T) {
 	var result db.Result
 
@@ -52,6 +152,9 @@ func TestZeroResultIsNoArm(t *testing.T) {
 	}
 	if _, ok := result.Table(); ok {
 		t.Error("Table() answered the zero Result, want it refused")
+	}
+	if _, ok := result.Value(); ok {
+		t.Error("Value() answered the zero Result, want it refused")
 	}
 }
 

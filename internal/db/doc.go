@@ -1,4 +1,4 @@
-// Package db manages database Profiles, the Connection Registry, MySQL driver integration, and SSH tunnel ports.
+// Package db manages database Profiles, the Connection Registry, the Engines' driver adapters, and SSH tunnel ports.
 //
 // A Profile is a named, saved description of how to reach one database: host, credentials reference, and optional SSH tunnel.
 // Profiles are the only way any Origin names a database.
@@ -7,7 +7,10 @@
 // Multiple connections can be open at once (e.g. the editor on one Profile while the MCP server uses another).
 //
 // This package holds the Keychain port (for password retrieval from OS keychain, never plaintext on disk),
-// the Driver port MySQL is reached through, and the Tunnel port a Profile's bastion is reached through.
+// the Driver port each Engine is reached through — MySQL and Redis today, MongoDB to come (ADR-0006) —
+// and the Tunnel port a Profile's bastion is reached through.
+// The Redis adapter runs the Approval Gate's Redis classifier on its own read path, because that Engine has
+// no read-only transaction to back the classifier up; it is the one place this package imports internal/guard.
 // A tunnelled Profile is dialled from its bastion rather than from this machine, and its tunnel lives and
 // dies with the connection the Registry holds.
 // It exports a narrow API; internal machinery is hidden from adapters.

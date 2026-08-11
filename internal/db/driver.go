@@ -16,13 +16,23 @@ var ErrAuthFailed = errors.New("db: authentication failed")
 // out.
 var ErrUnreachable = errors.New("db: server unreachable")
 
-// ErrWriteAttempt reports that the database refused a statement because it
-// tried to write inside the read-only transaction reads execute in.
+// ErrWriteAttempt reports that a statement classified a read would have
+// written, and was refused on the read path rather than run.
 //
-// It is the Approval Gate's second layer firing: the statement was classified a
-// read, and the database disagreed. Callers reroute it to the gate rather than
-// showing it as a failure — the query was not wrong, it was misjudged.
-var ErrWriteAttempt = errors.New("db: the statement tried to write inside a read-only transaction")
+// It is the Approval Gate's second layer firing. Callers reroute it to the gate
+// rather than showing it as a failure — the query was not wrong, it was
+// misjudged.
+//
+// Which layer fires is per-Engine (ADR-0006), and the outcome is the same on
+// purpose. For MySQL it is the database: the statement ran inside a READ ONLY
+// transaction and the server refused it. For Redis there is no such
+// transaction, so the adapter is its own second layer and produces this from
+// its own check — it runs the Engine's classifier against the command line at
+// the connection, immediately before executing, and refuses a Mutation there.
+// A caller cannot tell the two apart, and has no reason to: either way a
+// statement believed to be a read turned out not to be, and it goes back to the
+// gate.
+var ErrWriteAttempt = errors.New("db: the statement tried to write on the read path")
 
 // MaxRows is the most rows a ReadQuery returns. A desktop client renders what a
 // human reads, and the performance budget is a feature: an unbounded SELECT

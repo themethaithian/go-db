@@ -160,7 +160,10 @@ func TestClassifyPicksTheClassifierForTheEngine(t *testing.T) {
 		{"Redis mutation", db.EngineRedis, "DEL user:1", false, []string{"DEL"}},
 		{"a Redis read is not SQL", db.EngineMySQL, "GET user:1", false, nil},
 		{"SQL is not a Redis command", db.EngineRedis, "SELECT 1", false, []string{"SELECT"}},
-		{"MongoDB is unjudged", db.EngineMongoDB, "db.users.find({})", false, []string{"MongoDB"}},
+		{"MongoDB read", db.EngineMongoDB, "db.users.find({})", true, []string{"find"}},
+		{"MongoDB mutation", db.EngineMongoDB, "db.users.deleteMany({})", false, []string{"deleteMany"}},
+		{"SQL is not the MongoDB grammar", db.EngineMongoDB, "SELECT 1", false, []string{"MongoDB"}},
+		{"a MongoDB call is not SQL", db.EngineMySQL, "db.users.find({})", false, nil},
 		{"an unset Engine is unjudged", db.Engine(""), "SELECT 1", false, nil},
 		{"an unknown Engine is unjudged", db.Engine("postgres"), "SELECT 1", false, []string{"postgres"}},
 	}
@@ -380,32 +383,62 @@ func TestRedisMutationIsAuditedThroughTheApprovalConsole(t *testing.T) {
 	}
 }
 
-// MongoDB has an adapter nowhere and a classifier nowhere, and the gate's
-// answer to both is the same one it gives anything it cannot prove: a mutation.
-// A find() is as withheld as a drop(), which is the fail-closed posture
-// ADR-0006 asks for, and it falls out of the dispatch rather than being a case
-// written into RunQuery.
-func TestMongoDBStatementsAreWithheld(t *testing.T) {
+// A MongoDB Profile is judged by the MongoDB classifier, which is what the
+// dispatch is for. The verdicts themselves are specified in internal/guard;
+// what is claimed here is that they arrive — a find() runs, a deleteMany() is
+// withheld by the gate, and text that is not the grammar at all is withheld
+// too rather than waved through as something nobody could judge.
+//
+// (The driver these run against answers with the Value arm, because the
+// MongoDB adapter and its Documents arm are not written. The Engine's answers
+// are not what this test is about.)
+func TestMongoDBStatementsAreJudgedByTheGrammar(t *testing.T) {
 	driver := &valueDriver{reply: db.Reply{Kind: db.ReplyNil}}
 	svc := newEngineFacade(t, db.EngineMongoDB, db.Drivers{db.EngineMongoDB: driver})
+	ctx := context.Background()
 
-	got := svc.RunQuery(context.Background(), "store", "", "db.users.find({})", guard.OriginHuman)
+	t.Run("a find is a read and runs", func(t *testing.T) {
+		got := svc.RunQuery(ctx, "store", "", "db.users.find({})", guard.OriginHuman)
 
-	if got.Status != service.QueryRequiresConfirmation {
-		t.Fatalf("status = %q, want %q (message: %s)",
-			got.Status, service.QueryRequiresConfirmation, got.Message)
-	}
-	if got.Classification.IsRead() {
-		t.Errorf("classification = %+v, want a mutation: nothing here can judge a MongoDB statement", got.Classification)
-	}
-	if !strings.Contains(got.Classification.Reason, "MongoDB") {
-		t.Errorf("reason = %q, want it to say MongoDB statements cannot be judged yet", got.Classification.Reason)
-	}
-	if reads := driver.Reads(); len(reads) != 0 {
-		t.Errorf("the database was asked %v, want nothing asked at all", reads)
-	}
-	if execs := driver.Execs(); len(execs) != 0 {
-		t.Errorf("a withheld statement executed %v", execs)
+		if got.Status != service.QueryOK {
+			t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.QueryOK, got.Message)
+		}
+		if !got.Classification.IsRead() {
+			t.Errorf("classification = %+v, want a read", got.Classification)
+		}
+		if reads := driver.Reads(); len(reads) != 1 || reads[0] != "db.users.find({})" {
+			t.Errorf("the database was asked %v, want the call as written, once", reads)
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		statement string
+	}{
+		{"a delete is withheld", "db.users.deleteMany({})"},
+		{"a pipeline that writes is withheld", `db.users.aggregate([{$out: "copy"}])`},
+		{"a second call in the buffer is withheld", "db.users.find({}); db.users.drop()"},
+		{"text that is not the grammar is withheld", "DROP TABLE users"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			execsBefore := len(driver.Execs())
+
+			got := svc.RunQuery(ctx, "store", "", tc.statement, guard.OriginHuman)
+
+			if got.Status != service.QueryRequiresConfirmation {
+				t.Fatalf("status = %q, want %q (message: %s)",
+					got.Status, service.QueryRequiresConfirmation, got.Message)
+			}
+			if got.Classification.IsRead() {
+				t.Errorf("classification = %+v, want a mutation", got.Classification)
+			}
+			if got.Preview == nil || got.Preview.Available {
+				t.Errorf("Preview = %+v, want one that says there is no preview for a MongoDB statement", got.Preview)
+			}
+			if execs := driver.Execs(); len(execs) != execsBefore {
+				t.Errorf("a withheld statement executed %v", execs)
+			}
+		})
 	}
 }
 

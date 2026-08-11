@@ -22,19 +22,20 @@ import (
 
 // classifyFor judges statement with the classifier the Engine names.
 //
-// The default arm is the load-bearing one. An Engine reaches it two ways: it is
-// one go-db knows and has no classifier for yet (MongoDB, whose restricted
-// grammar ADR-0006 specifies and nobody has written), or it is not an Engine at
-// all — an unset one, or a word somebody put in profiles.toml by hand. Both are
-// the same situation from here: nothing in this app can say what the statement
-// does, so nothing may run it without a human saying so. That is the gate's own
-// posture, applied one level up.
+// Every Engine go-db knows now has one, so the default arm is reached only by
+// something that is not an Engine at all — an unset one, or a word somebody put
+// in profiles.toml by hand. It stays load-bearing for exactly that: nothing in
+// this app can say what such a statement does, so nothing may run it without a
+// human saying so. That is the gate's own posture, applied one level up, and it
+// is also where the next Engine lands before its classifier is written.
 func classifyFor(engine db.Engine, statement string) guard.Classification {
 	switch engine {
 	case db.EngineMySQL:
 		return guard.Classify(statement)
 	case db.EngineRedis:
 		return guard.ClassifyRedis(statement)
+	case db.EngineMongoDB:
+		return guard.ClassifyMongo(statement)
 	default:
 		return guard.Unjudged(cannotJudge(engine))
 	}
@@ -47,9 +48,12 @@ func classifyFor(engine db.Engine, statement string) guard.Classification {
 // rather than by a separator inside the text, so the whole trimmed buffer is
 // one span — and that is honest rather than lax: the classifier refuses a
 // buffer holding an embedded newline outright, so a span covering two commands
-// is a span the gate will withhold. Every other Engine takes the same answer
-// for the same reason, since a splitter that guessed at boundaries in a grammar
-// nobody has implemented would be inventing them.
+// is a span the gate will withhold. MongoDB's grammar reaches the same answer
+// from the other direction: it is one call per buffer by definition, newlines
+// inside it and all, and a buffer holding a second call is refused whole rather
+// than split into two. Every other Engine takes the same answer again, since a
+// splitter guessing at boundaries in a grammar nobody has implemented would be
+// inventing them.
 func splitFor(engine db.Engine, buffer string) []guard.StatementSpan {
 	if engine == db.EngineMySQL {
 		return guard.SplitStatements(buffer)
@@ -96,7 +100,9 @@ func (s *AppService) engineFor(profileName string) (db.Engine, error) {
 const noEngine = "go-db cannot tell what this statement is: there is no Profile to say what language it is written in"
 
 // cannotJudge says why a statement was not judged, for the human reading the
-// confirmation it raised.
+// confirmation it raised. Every Engine go-db knows has a classifier, so the
+// second line is written for the next one: an Engine added to db before the
+// classifier that judges it, which is a Mutation in the meantime and says so.
 func cannotJudge(engine db.Engine) string {
 	if !engine.Valid() {
 		return fmt.Sprintf("go-db does not know the %q engine this Profile names, so it cannot tell what this statement does", engine)

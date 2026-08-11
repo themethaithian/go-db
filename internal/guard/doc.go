@@ -29,6 +29,18 @@
 // provable without parsing arguments. Blocking and mode-switching commands are
 // off it too, because the editor shares one connection.
 //
+// ClassifyMongo is the verdict for the MongoDB Engine, with the same single
+// layer behind it. It reads the statement with internal/mongoql, which parses
+// the one shape go-db accepts — db.<collection>.<verb>(<args>), and not
+// JavaScript, which could not be classified without being evaluated — and then
+// judges the operation against a closed allowlist of reads. aggregate is the
+// one operation whose argument decides it: its pipeline is a read only when
+// every stage in it, and in every subpipeline its stages carry, is on a closed
+// list of stages that do not write. $out and $merge do; a stage nobody has
+// listed is refused for being unlisted rather than assumed harmless. Anything
+// that will not parse — SQL, a Redis command, a shell helper, a buffer holding
+// two calls — is a mutation, and says which grammar it was measured against.
+//
 // # Impact Preview
 //
 // PlanPreview rewrites a mutation into the reads that describe it — a COUNT and

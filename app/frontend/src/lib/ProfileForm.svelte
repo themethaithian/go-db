@@ -342,8 +342,26 @@
       </label>
 
       <label class="{labelClass} col-span-2">
-        User
-        <input class={fieldClass} bind:value={user} required />
+        <span class="flex items-center justify-between">
+          <span>User</span>
+          {#if engine === "redis"}
+            <span class="font-normal text-text-subtle">optional — default user</span>
+          {:else if engine === "mongodb"}
+            <span class="font-normal text-text-subtle">optional — unauthenticated</span>
+          {/if}
+        </span>
+        <!-- Required for MySQL, which has no unnamed user. Optional for the
+             other two Engines, and empty means something specific rather than
+             nothing: Redis's ACL treats an empty user as the default user
+             (what a plain requirepass server has), and MongoDB treats it as
+             an unauthenticated connection — see redisDriver.Open and
+             mongoDriver.Open. -->
+        <input
+          class={fieldClass}
+          bind:value={user}
+          placeholder={engine === "mysql" ? "" : "optional"}
+          required={engine === "mysql"}
+        />
       </label>
 
       <label class="{labelClass} col-span-2">

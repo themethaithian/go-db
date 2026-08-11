@@ -432,7 +432,14 @@ function orderDatabases(names: string[]): string[] {
 // Re-reads the saved Profiles into the configured map, and hands it to the
 // pins so old ones can be attributed. A failure is not worth reporting: the
 // only thing lost is the auto-open, and the tree still lists every database.
-function reloadConfigured(): Promise<void> {
+//
+// Exported as-is (rather than wrapped) because Connections needs exactly this:
+// a Profile just saved or deleted there is the same kind of staleness as one
+// saved or deleted anywhere else, and the fix is the same re-read. Without it,
+// a Profile created this session keeps answering MYSQL from `engineOf` — the
+// map's own fallback for "nobody's told me yet" — which is indistinguishable
+// from a human's Profile actually being MySQL until this runs.
+export function reloadConfigured(): Promise<void> {
   configuredRequested = true;
   configuredLoad = ListProfiles().then(
     (profiles) => {

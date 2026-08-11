@@ -18,6 +18,7 @@
     TestConnection,
   } from "../../wailsjs/go/app/App";
   import type { db } from "../../wailsjs/go/models";
+  import { reloadConfigured } from "./schema.svelte";
 
   let { onConnectionsChanged }: { onConnectionsChanged: () => void } = $props();
 
@@ -71,6 +72,13 @@
     try {
       await SaveProfile(profile, password);
       await refresh();
+      // The schema store's own copy of this Profile's Database and Engine —
+      // read by engineOf/introspectable and so by the Explorer and the
+      // Editor's completion — is only ever loaded lazily; without this it
+      // would keep answering for whatever this Profile used to be (or MySQL,
+      // for one that is new) until something else happened to trigger a
+      // re-read.
+      void reloadConfigured();
       formError = null;
       selectedName = profile.Name;
       mode = "edit";
@@ -83,6 +91,9 @@
     try {
       await DeleteProfile(name);
       await refresh();
+      // Same reasoning as handleSave: a deleted Profile's Engine must stop
+      // being answerable at all, not linger as whatever it last was.
+      void reloadConfigured();
       formError = null;
       selectedName = null;
       mode = "empty";

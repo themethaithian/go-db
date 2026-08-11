@@ -31,3 +31,7 @@ _Avoid_: active connection (implies only one), connection pool (that's per-conne
 **Impact Preview**:
 An advisory estimate of what a mutating query would do — affected-row count and a sample of affected rows — computed without executing the write. Some statements (e.g. DDL) have no preview and say so explicitly. Shown in both Inline Confirm and the Approval Console; the actual outcome is recorded alongside it after execution.
 _Avoid_: dry run, preview rows
+
+**Engine**:
+The kind of database a Profile reaches — MySQL, Redis, or MongoDB. The Engine determines the statement language the editor accepts, the classifier that judges it, and the shape of results; everything else (the Approval Gate, both Origin policies, the Connection Registry, the audit log) is Engine-agnostic.
+_Avoid_: database type, dialect, driver (for the kind)

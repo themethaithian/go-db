@@ -32,7 +32,7 @@ Deep modules: each package exports a narrow API and hides its machinery. Before 
 
 ## Hard constraints
 
-- v1 scope is frozen: connection manager, single SQL editor, results table (pagination), approval console, MCP server mode. **No** ER diagrams, export, multi-tab, Postgres, or PII masking until v2.
+- v1 scope shipped: connection manager, single SQL editor, results table (pagination), approval console, MCP server mode. v2 is underway and adds exactly one thing: multi-engine support — Redis and MongoDB per ADR-0006, MySQL behaviour unchanged. **No** ER diagrams, export, multi-tab, Postgres, or PII masking until this is done.
 - Performance budget is a feature: idle RAM < 150 MB, launch-to-usable < 2 s, live RAM usage shown in the app status bar.
 - Passwords never touch disk in plaintext — OS keychain only.
 - Node on this machine is 20.11 → Vite stays pinned to v6 until Node ≥ 20.19.

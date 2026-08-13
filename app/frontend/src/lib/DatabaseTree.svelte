@@ -1,9 +1,19 @@
 <script lang="ts">
-  // The Database tool window: every connected Profile as a root, the server's
-  // databases beneath it, that database's tables beneath those, and a table's
-  // columns beneath that. Disconnected Profiles are simply absent — this
-  // window answers "what can I browse right now", and the Connections view is
-  // where a Profile becomes browsable.
+  // The Database tool window: the active Engine's connected Profiles as
+  // roots, the server's databases beneath each, that database's tables
+  // beneath those, and a table's columns beneath that. Disconnected Profiles
+  // are simply absent — this window answers "what can I browse right now",
+  // and the Connections view is where a Profile becomes browsable.
+  //
+  // Only one Engine's Profiles are ever drawn at a time — the switcher above
+  // the tree (explorerEngine.svelte.ts) picks which — because a MySQL server,
+  // a Redis keyspace and a MongoDB database read as three different kinds of
+  // list, and interleaving them under one filter box answered a question
+  // nobody asked ("what matches, across every Engine at once?") instead of
+  // the one a human actually has ("what matches on the one I'm looking at?").
+  // Every connected Profile's schema stays cached regardless of which Engine
+  // is on screen — see syncProfiles below — so switching tabs costs nothing
+  // and loses nothing.
   //
   // The databases level exists because a Profile does not have to name one. A
   // Profile with a blank Database field connects to a server, and until there
@@ -39,7 +49,8 @@
   // scope; this component only renders them.
   import { untrack } from "svelte";
   import { isPinned, pinnedAmong, togglePin } from "./pins.svelte";
-  import { MONGODB, REDIS } from "./browse";
+  import { MONGODB, MYSQL, REDIS } from "./browse";
+  import { enginesPresent, explorerEngine, switchEngine } from "./explorerEngine.svelte";
   import {
     databaseNode,
     engineLabel,
@@ -83,6 +94,12 @@
     return engineNouns(engineOf(profileName));
   }
 
+  // The active tab's own nouns, for the one piece of chrome that names an
+  // Engine's rows without a Profile at hand to ask engineOf about: the filter
+  // box's placeholder. No Profile connected yet reads as MySQL's words, the
+  // same fallback engineNouns already gives an Engine it does not recognise.
+  let activeNouns = $derived(engineNouns(explorerEngine.active ?? MYSQL));
+
   let {
     connectedProfiles,
     width,
@@ -93,10 +110,40 @@
     onGoToConnections: () => void;
   } = $props();
 
-  // The tree's roots are exactly the connected Profiles, so every change to
-  // that list adds or drops a root — and dropping one drops its cached schema.
+  // The tree's roots are every connected Profile, of every Engine — dropping
+  // one from this list drops its cached schema, so it must keep flowing in
+  // whole even though only one Engine's roots are ever drawn. Segmenting the
+  // *rendering* by Engine happens below, entirely downstream of this: the
+  // cache does not know there is a switcher.
   $effect(() => {
     syncProfiles(connectedProfiles);
+  });
+
+  // Which Engines have a connected Profile right now, in tab order — the
+  // switcher's own tabs, and what the fallback below chooses among.
+  let present = $derived(enginesPresent(connectedProfiles));
+
+  // The active Engine's Profiles: what the tree actually draws. `nodes` and
+  // `schemas` in schema.svelte.ts still hold every connected Profile's
+  // state — this is a read-only narrowing of what is rendered, never a
+  // narrowing of what is cached.
+  let visibleProfiles = $derived(
+    connectedProfiles.filter((name) => engineOf(name) === explorerEngine.active),
+  );
+
+  // The active Engine can go stale for two reasons: nothing has chosen one
+  // yet (a fresh launch, or a restored choice from before this session's
+  // Profiles connected), or the one that was active has just lost its last
+  // connected Profile. Either way the fix is the same — fall back to the
+  // first Engine that still has one, restoring whatever was open on it, or to
+  // no Engine at all if none is connected. This is the only place that
+  // fallback runs, and switchEngine is the only thing that runs it, so
+  // `selected` is never out of step with which tab (if any) is highlighted.
+  $effect(() => {
+    const stillPresent = present.some((p) => p.engine === explorerEngine.active);
+    if (!stillPresent) {
+      switchEngine(present[0]?.engine ?? null, connectedProfiles);
+    }
   });
 
   function rowEstimateLabel(estimate: number | null): string {
@@ -157,6 +204,13 @@
   };
   let expansionSnapshot: ExpansionSnapshot | null = null;
 
+  // Captured and restored over every connected Profile, not just the active
+  // Engine's: the Engine switcher can change mid-filter, and auto-expand then
+  // runs over the newly visible Profiles too. A snapshot scoped to whichever
+  // Engine happened to be on screen when the first character landed would
+  // leave the other Engine's tree however the filter opened it. Auto-expand
+  // and the no-match check stay scoped to the visible Profiles — they act on
+  // what is drawn — but the state being preserved belongs to everyone.
   function captureExpansion(): ExpansionSnapshot {
     const profiles: Record<string, boolean> = {};
     const databases: Record<string, Record<string, boolean>> = {};
@@ -217,7 +271,7 @@
   // would open onto nothing and cost a fetch this filter has no business
   // asking for.
   function autoExpandMatches() {
-    for (const profileName of connectedProfiles) {
+    for (const profileName of visibleProfiles) {
       const pNode = profileNode(profileName);
       let anyDbVisible = false;
       for (const database of pNode.databases ?? []) {
@@ -241,7 +295,7 @@
   // already uses above it.
   function anyMatchVisible(): boolean {
     if (!filtering) return true;
-    for (const profileName of connectedProfiles) {
+    for (const profileName of visibleProfiles) {
       const pNode = profileNode(profileName);
       for (const database of pNode.databases ?? []) {
         if (databaseVisible(database, databaseNode(profileName, database))) return true;
@@ -549,9 +603,53 @@
     </button>
   </div>
 
-  <!-- The filter, right under the header where it can act on everything
-       below it. Esc clears and hands focus back to the tree; the × does the
-       same with the mouse, but leaves focus in the box for another query. -->
+  <!-- The Engine switcher: one tab per Engine with a connected Profile, so a
+       human working across MySQL, Redis and Mongo at once can tell which of
+       three otherwise-identical Database tool windows they are looking at.
+       The tree itself only ever draws one Engine's Profiles — every
+       connected Profile's schema stays cached in schema.svelte.ts regardless
+       of which tab is on screen, so switching tabs is instant and loses
+       nothing. Hidden along with the rest of the tool window's chrome once
+       nothing is connected: a switcher with nothing to switch between is not
+       a switcher. switchEngine changes the tab and restores (or clears)
+       `selected` in the same call, so the tab highlighted here and the table
+       the browse pane shows can never disagree. -->
+  {#if present.length > 0}
+    <div class="flex h-10 shrink-0 items-center border-b border-border px-3">
+      <div
+        class="flex h-7 min-w-0 flex-1 items-center gap-0.5 overflow-x-auto rounded-control border border-border bg-surface p-0.5 text-sm"
+        role="group"
+        aria-label="Switch Engine"
+      >
+        {#each present as { engine, count } (engine)}
+          <button
+            type="button"
+            class="flex shrink-0 items-center gap-1.5 rounded-control px-2.5 py-1 font-medium tracking-wide uppercase transition-colors {explorerEngine.active ===
+            engine
+              ? 'bg-accent text-white'
+              : 'text-text-muted hover:bg-surface-overlay hover:text-text'}"
+            aria-pressed={explorerEngine.active === engine}
+            onclick={() => switchEngine(engine, connectedProfiles)}
+            title="{engineLabel(engine)} — {count} connected"
+          >
+            {engineLabel(engine)}
+            <span
+              class="tabular-nums normal-case {explorerEngine.active === engine
+                ? 'text-white/80'
+                : 'text-text-subtle'}"
+            >
+              {count}
+            </span>
+          </button>
+        {/each}
+      </div>
+    </div>
+  {/if}
+
+  <!-- The filter, right under the header (and the switcher, when it is
+       showing) where it can act on everything below it. Esc clears and hands
+       focus back to the tree; the × does the same with the mouse, but leaves
+       focus in the box for another query. -->
   <div class="flex h-10 shrink-0 items-center border-b border-border px-3">
     <div
       class="flex h-7 w-full items-center gap-1.5 rounded-control border border-border bg-surface px-2 transition-colors focus-within:border-accent hover:border-border-strong"
@@ -574,7 +672,7 @@
         bind:value={filterQuery}
         onkeydown={handleFilterKeydown}
         class="min-w-0 flex-1 bg-transparent text-base text-text placeholder:text-text-subtle focus:outline-none"
-        placeholder="Filter tables…"
+        placeholder="Filter {activeNouns.many}…"
         spellcheck="false"
         autocapitalize="off"
         autocomplete="off"
@@ -619,10 +717,10 @@
       </p>
     {:else if filtering && !anyMatchVisible()}
       <p class="px-4 py-2 text-sm text-text-subtle">
-        No tables match "{filterQuery.trim()}"
+        No {activeNouns.many} match "{filterQuery.trim()}"
       </p>
     {:else}
-      {#each connectedProfiles as profileName (profileName)}
+      {#each visibleProfiles as profileName (profileName)}
         {@const node = profileNode(profileName)}
         <div class="flex items-center border-l-2 border-transparent pr-2 pl-1 hover:bg-surface-raised">
           <button

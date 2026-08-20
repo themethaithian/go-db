@@ -73,6 +73,7 @@
     SplitStatements,
     PageWindow,
     Repage,
+    OpenSQLFile,
   } from "../../wailsjs/go/app/App";
   import type { guard, service } from "../../wailsjs/go/models";
 
@@ -467,18 +468,114 @@
     return () => clearTimeout(timer);
   });
 
+  // Run all's own busy flag, declared up here (rather than beside runAll()
+  // below) because canRun folds it in immediately below: the ordinary Run
+  // (and anything else canRun gates) is off while a script is in flight.
+  // loadMore and rerun check it directly too, since `running` alone is only
+  // true for the instant one statement is actually in flight, and goes
+  // false in the gaps between a run-all's statements — a scroll or a rerun
+  // click landing in one of those gaps must not interleave with the script.
+  let runningAll = $state(false);
+
   // A confirm panel open counts as busy too: resolving it (confirm or cancel)
   // is the only way forward, so a second Run cannot spawn a second pending
   // behind the human's back.
   let confirmOpen = $derived(result?.status === "requires_confirmation");
   let canRun = $derived(
-    profileConnected && target !== "" && !running && !confirmOpen && !edits.saving,
+    profileConnected && target !== "" && !running && !confirmOpen && !edits.saving && !runningAll,
   );
 
   async function run() {
     const statement = target;
     if (!canRun || profileName === null) return;
     await execute(profileName, database, statement);
+  }
+
+  // The rest of Run all's own state: runAllAt/runAllTotal are the 1-based
+  // progress the Stop button's label reads. stopRequested is set by that
+  // Stop click and is only ever consulted between statements — it never
+  // interrupts one already sent to RunQuery.
+  //
+  // confirmWaiter is a deliberately plain variable, not $state: the
+  // template never reads it, it is purely a handoff between this loop and
+  // whichever code resolves the Inline Confirm currently on screen
+  // (handlePendingResolved on a human answer, or the cancel effect below on
+  // a tab switch) — wrapping a resolver function in reactive state would be
+  // both pointless and wrong.
+  let runAllAt = $state(0);
+  let runAllTotal = $state(0);
+  let stopRequested = $state(false);
+  let confirmWaiter: ((outcome: service.QueryResult | null) => void) | null = null;
+
+  // Runs every statement in the buffer, one after another, each through the
+  // exact same RunQuery path run() itself uses — the classifier, the
+  // Approval Gate, the Inline Confirm and the AuditLog each see every
+  // statement individually, exactly as if the human had clicked Run down
+  // the buffer by hand. Run all is a convenience for the human's finger,
+  // never a new trust path.
+  //
+  // Profile, database, the tab, and the statement texts are all captured up
+  // front — the same capture rationale execute() and loadMore() document
+  // for their own parameters: a run-all is aimed at the buffer as it stood
+  // when the human started it, and the awaits between statements are long
+  // enough for any of the four to change.
+  //
+  // The loop stops at the first statement that does not plainly succeed —
+  // anything other than "ok" or a confirmed "executed" — because a script's
+  // later statements usually assume its earlier ones already ran; ploughing
+  // on past a failure, or past a mutation the human declined, would run
+  // statements against a state the script itself never produced. That is
+  // also why a cancelled Inline Confirm stops the whole run rather than
+  // skipping just that one statement: a human cancelling one statement of a
+  // script has said "stop the script", not "skip this one and keep
+  // mutating" — the same reading saveEdits gives a cancel part-way through
+  // saving dirty rows.
+  async function runAll() {
+    if (!canRun || profileName === null || statements.length === 0 || runningAll) return;
+    const profile = profileName;
+    const schema = database;
+    const docId = doc.id;
+    const texts = statements.map((s) => s.text);
+    runningAll = true;
+    stopRequested = false;
+    runAllTotal = texts.length;
+    try {
+      for (let i = 0; i < texts.length; i += 1) {
+        if (stopRequested) break;
+        runAllAt = i + 1;
+        await execute(profile, schema, texts[i]);
+        // The human may have switched tabs, Profiles, or databases while
+        // that statement's RunQuery was in flight — the same re-check
+        // loadMore makes after each of its own awaits. A run-all must never
+        // send statement N+1 to a tab or connection it was not started on.
+        if (doc.id !== docId || profileName !== profile || database !== schema) break;
+        const status = result?.status;
+        if (status === "ok" || status === "executed") continue;
+        if (status === "requires_confirmation") {
+          // The InlineConfirm panel is already on screen for this statement
+          // — result itself drives it. Park here until the human answers
+          // it, or until the cancel effect below retracts the pending out
+          // from under the run; either path resolves confirmWaiter, never
+          // this line.
+          const outcome = await new Promise<service.QueryResult | null>((resolve) => {
+            confirmWaiter = resolve;
+          });
+          if (outcome === null) break;
+          if (outcome.status === "executed") continue;
+          break;
+        }
+        // failed, not_connected, rejected, timed_out, unknown_pending, or
+        // anything else that is not a plain success: stop, and leave that
+        // statement's result and message on screen as the explanation for
+        // why the run stopped.
+        break;
+      }
+    } finally {
+      runningAll = false;
+      runAllAt = 0;
+      runAllTotal = 0;
+      stopRequested = false;
+    }
   }
 
   // Whether there is anything to pretty-print — same rule Save uses, since
@@ -525,7 +622,7 @@
   // appended pages to get there would be N more gate-visible, audited queries
   // for a save that already was one.
   async function rerun() {
-    if (profileName === null || ranSql === "" || running) return;
+    if (profileName === null || ranSql === "" || running || runningAll) return;
     await execute(profileName, database, ranSql);
   }
 
@@ -592,7 +689,20 @@
   // switch on its own.
   async function loadMore() {
     const profile = profileName;
-    if (profile === null || pageWindow === null || running || loadingMore || !hasMoreAfter) return;
+    // running alone is not enough here: it is only true for the instant one
+    // statement is actually in flight, and goes false in the gaps between a
+    // run-all's statements. Without runningAll a scroll landing in one of
+    // those gaps could interleave a page fetch into the middle of the
+    // script.
+    if (
+      profile === null ||
+      pageWindow === null ||
+      running ||
+      runningAll ||
+      loadingMore ||
+      !hasMoreAfter
+    )
+      return;
     const schema = database;
     const statement = ranSql;
     const window = pageWindow;
@@ -699,6 +809,15 @@
       CancelPending(pending.pending_id);
       untrack(() => {
         if (result === pending) result = null;
+        // A run-all may be parked awaiting exactly this confirmation's
+        // answer. Left unresolved it would await a promise nobody will ever
+        // settle — the confirmation that would have settled it was just
+        // cancelled out from under the run by a tab switch, a Profile or
+        // database change, or an edit to the SQL.
+        if (confirmWaiter !== null) {
+          confirmWaiter(null);
+          confirmWaiter = null;
+        }
       });
     }
   });
@@ -724,6 +843,13 @@
 
   function handlePendingResolved(next: service.QueryResult) {
     result = next;
+    // A run-all may be parked awaiting exactly this confirmation's outcome
+    // (see runAll above); hand it over and free the handoff so a later
+    // confirmation in the same run does not find it still set.
+    if (confirmWaiter !== null) {
+      confirmWaiter(next);
+      confirmWaiter = null;
+    }
   }
 
   function startRename(id: string) {
@@ -780,6 +906,38 @@
 
   function toggleSavedPopover() {
     savedPopoverOpen = !savedPopoverOpen;
+  }
+
+  // "Open .sql file" beside the + button: the same OS dialog a human expects
+  // from any desktop editor, feeding openDocument exactly what + does — the
+  // active tab's own Profile and database, since a file picked up from disk
+  // is still a new line of enquiry against whatever the human is already
+  // connected to. openDocument's byte-identical dedupe (documents.svelte.ts)
+  // means reopening the same, unmodified file brings its existing tab
+  // forward instead of stacking a second copy — wanted here, not worked
+  // around, since "open" reads as "show me that" the second time too.
+  //
+  // A human dismissing the file picker (cancelled) is silent — nothing
+  // happened because nothing was asked to. A real failure (too large, not
+  // UTF-8, unreadable) surfaces as a brief transient beside the button,
+  // mirroring the "Saved" transient above rather than a dialog: this is a
+  // one-line fact about a file pick, not an event worth interrupting typing
+  // over.
+  let openFileError = $state("");
+  let openFileErrorTimer: ReturnType<typeof setTimeout> | undefined;
+
+  async function openSqlFile() {
+    const file = await OpenSQLFile();
+    if (file.cancelled) return;
+    if (file.err) {
+      openFileError = file.err;
+      clearTimeout(openFileErrorTimer);
+      openFileErrorTimer = setTimeout(() => {
+        openFileError = "";
+      }, 4000);
+      return;
+    }
+    openDocument(file.sql, file.name, database, profileName);
   }
 
   // Opening a saved query closes the popover — the human asked to see their
@@ -934,6 +1092,25 @@
       {running ? "Running…" : "Run"}
       <kbd class="rounded-sm bg-white/15 px-1 py-px font-sans text-xs text-white/80">⌘⏎</kbd>
     </button>
+
+    {#if statements.length > 1}
+      <!-- Run all: only worth showing once there is more than one statement
+           to run — on a single-statement buffer it would say nothing Run
+           does not already say. Idle, it is disabled under the same
+           conditions as Run (canRun already folds !runningAll into that).
+           Mid-run it becomes the Stop control instead of a second, useless
+           "running" label: same button, same slot, and it stays clickable
+           while everything else on this bar is locked, because Stop is the
+           one thing a human still needs to be able to do. -->
+      <button
+        type="button"
+        class="inline-flex h-8 shrink-0 items-center gap-2 rounded-control border border-border bg-surface-raised pr-2.5 pl-3.5 text-base font-medium text-text transition-colors hover:border-border-strong hover:bg-surface-overlay disabled:cursor-not-allowed disabled:opacity-40"
+        disabled={!runningAll && !canRun}
+        onclick={runningAll ? () => (stopRequested = true) : runAll}
+      >
+        {runningAll ? `Stop (${runAllAt}/${runAllTotal})` : `Run all (${statements.length})`}
+      </button>
+    {/if}
   </div>
 
   <div class="flex min-h-0 flex-1 flex-col p-3">
@@ -1029,6 +1206,32 @@
               <path d="M6 2v8M2 6h8" />
             </svg>
           </button>
+
+          <button
+            type="button"
+            class="my-1 ml-0.5 flex w-6 shrink-0 items-center justify-center rounded-control text-text-subtle transition-colors hover:bg-surface-raised hover:text-text"
+            title="Open .sql file"
+            aria-label="Open .sql file"
+            onclick={openSqlFile}
+          >
+            <svg
+              class="h-3 w-3"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M1.5 3.5A1 1 0 0 1 2.5 2.5h2l1 1.25h3a1 1 0 0 1 1 1V9a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1v-5.5Z" />
+              <path d="M6 6.25v3M4.5 7.75h3" />
+            </svg>
+          </button>
+
+          {#if openFileError}
+            <span class="ml-1 self-center truncate text-xs text-danger" title={openFileError}>{openFileError}</span>
+          {/if}
         </div>
 
         <div

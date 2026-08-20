@@ -1,6 +1,6 @@
 <script lang="ts">
   import { db } from "../../wailsjs/go/models";
-  import { ExecutablePath } from "../../wailsjs/go/app/App";
+  import { ExecutablePath, PickKeyFile } from "../../wailsjs/go/app/App";
   import type { ConnectionOutcome } from "./connection";
 
   // Create/edit form for a single Profile. `profile` is null when creating;
@@ -188,6 +188,19 @@
     sshUser = profile?.SSH?.User ?? "";
     sshKeyFile = profile?.SSH?.KeyFile ?? "";
   });
+
+  // Opens the OS file picker for the SSH key field. The tunnel reads
+  // sshKeyFile exactly as written — no `~` expansion, by design, since an
+  // explicit path is a choice (internal/db reads it with os.ReadFile as
+  // given) — so this is how a human gets an absolute path right without
+  // typing it by hand, a field that has already burned them twice. A
+  // cancelled dialog and a picker error are both left as no-ops: the human
+  // still has the text field to fall back on either way.
+  async function pickKeyFile() {
+    const picked = await PickKeyFile();
+    if (picked.cancelled || picked.err) return;
+    sshKeyFile = picked.path;
+  }
 
   function parsedSshPort(): number {
     const trimmed = sshPortInput.trim();
@@ -482,7 +495,17 @@
 
           <label class="{labelClass} col-span-2">
             Key file
-            <input class={fieldClass} bind:value={sshKeyFile} placeholder="optional" />
+            <span class="flex gap-2">
+              <input class="{fieldClass} flex-1" bind:value={sshKeyFile} placeholder="optional" />
+              <button
+                type="button"
+                class={secondaryButton}
+                onclick={pickKeyFile}
+                aria-label="Choose SSH key file"
+              >
+                Browse…
+              </button>
+            </span>
           </label>
 
           <p class="col-span-4 -mt-1 text-xs leading-relaxed text-text-subtle">

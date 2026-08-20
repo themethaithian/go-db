@@ -78,3 +78,58 @@ func (a *App) OpenSQLFile() OpenedFile {
 
 	return OpenedFile{Name: filepath.Base(path), SQL: text}
 }
+
+// PickedPath is what PickKeyFile hands back to the frontend: either the path
+// the human chose, or an account of why there isn't one. Cancelled and Err
+// are kept distinct for the same reason OpenedFile keeps them distinct —
+// dismissing the OS picker is an ordinary outcome the Profile form should
+// treat as a no-op, while Err names something that actually went wrong.
+type PickedPath struct {
+	Path      string `json:"path"`
+	Cancelled bool   `json:"cancelled"`
+	Err       string `json:"err,omitempty"`
+}
+
+// PickKeyFile shows the OS "open file" dialog so a human setting up an SSH
+// tunnel (ProfileForm's "Key file" field) can hand go-db an absolute path
+// instead of typing one by hand — a field that has already burned them
+// twice, since go-db reads the path exactly as written (no `~` expansion:
+// internal/db treats an explicit path as a choice) and a hand-typed path is
+// easy to get subtly wrong. It lives here in app/ for the same reason
+// OpenSQLFile does: this is a fact about the OS window, not domain logic,
+// and internal/ has no business knowing a native file picker exists.
+//
+// Deliberately no file filter. Unlike OpenSQLFile's *.sql filter, a private
+// key has no reliable extension to filter on — the conventional names are
+// extensionless (id_ed25519) or arbitrary (cmmn-gw-nonprd-ec2-rds-tunnel-
+// appusr) — so a *.pem filter would hide exactly the files this button
+// exists to find.
+//
+// This binding only answers "which file". It does not read or validate the
+// key: whether it parses, is passphrase-protected, or is otherwise unusable
+// is the tunnel's business at connect time (internal/db/ssh.go already
+// reports each of those with a fix named), and duplicating that judgement
+// here would just let the two answers drift apart.
+func (a *App) PickKeyFile() PickedPath {
+	// DefaultDirectory starts the dialog in the human's home directory,
+	// where ~/.ssh conventionally lives — but only if we can find it; a
+	// failure here isn't worth reporting, since the dialog opens with its
+	// own platform default just as well.
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = ""
+	}
+
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:            "Choose SSH key file",
+		DefaultDirectory: homeDir,
+	})
+	if err != nil {
+		return PickedPath{Err: "couldn't open the file picker"}
+	}
+	if path == "" {
+		return PickedPath{Cancelled: true}
+	}
+
+	return PickedPath{Path: path}
+}

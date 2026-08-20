@@ -5,7 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>go-db</title>
   </head>
-  <body>
+  <!-- macOS's own text substitution reaches every input in a WKWebView unless
+       told otherwise, and it has no place in a database client: it turns an
+       SSH user "appusr" into "Appear" and a column name into prose, silently,
+       in exactly the fields where a mangled character means a failed
+       connection. All three attributes inherit, so declaring them once on
+       <body> covers every input and textarea the app renders; CodeMirror
+       already sets its own. -->
+  <body autocorrect="off" autocapitalize="off" spellcheck="false">
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

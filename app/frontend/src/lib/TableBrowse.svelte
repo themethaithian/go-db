@@ -90,11 +90,41 @@
 
   let result = $state<service.QueryResult | null>(null);
   let failure = $state<string | null>(null);
+  // True only while a replacing fetch (a new table, condition, limit, or an
+  // explicit refresh) is in flight — the whole pane's own "Loading rows…"
+  // placeholder. A Load more fetch has its own flag below, since it must not
+  // blank the grid the human is already scrolled through.
   let loading = $state(false);
+  // True while a Load more fetch is in flight — passed straight to
+  // ResultsTable so its footer button can say "Loading…" and so it does not
+  // fire a second scroll-triggered fetch on top of this one.
+  let loadingMore = $state(false);
   // The statement behind what is on screen right now — set from the fetch that
   // produced it, never from the current controls, so the caption is a record
-  // rather than a promise.
+  // rather than a promise. Always the offset-0 statement: the caption names
+  // the browse in force, not whichever page of it a scroll happened to reach.
   let shownSql = $state("");
+
+  // The rows accumulated for the browse now on screen — appended to by
+  // loadMore, replaced wholesale the moment the browse itself changes (a
+  // different table, condition, limit, or an explicit refresh). ResultsTable
+  // renders all of them; this pane owns deciding when "all of them" grows
+  // versus starts over.
+  let loadedRows = $state<(string | null)[][]>([]);
+
+  // How many rows the most recent fetch itself returned — not the running
+  // total — so hasMoreAfter can ask table browsing's only honest question
+  // (there is no COUNT(*) here): did the last batch fill the page, or was
+  // that the end of the table? A short batch, first or Nth, means there is
+  // nothing left to load.
+  let lastBatchSize = $state<number | null>(null);
+
+  // Bumped only when the accumulation restarts under a new browse — never on
+  // an appended batch. Handed to ResultsTable as `resultKey`: see its own doc
+  // for why an explicit counter, rather than array identity or a length
+  // heuristic, is the only reliable way to tell a fresh browse from the next
+  // page of the one already on screen.
+  let resultKey = $state(0);
 
   // The condition as it is being typed, which is not yet the condition in
   // force: it becomes browse.filter on Enter, and that is what re-runs the
@@ -123,17 +153,25 @@
   // and limit changes take the same numbered path, for the same reason.
   let latestRequest = 0;
 
-  // The statement that browses the selection. The table is qualified with the
-  // database it was picked from — the tree can show two schemas with a `users`
-  // in each, and an unqualified name would read whichever the connection
-  // happens to default to.
+  // The statement that browses the selection, always at offset 0 — the
+  // caption and the fetch effect below both mean "the browse in force", not
+  // whichever page of it a scroll happened to reach. The table is qualified
+  // with the database it was picked from — the tree can show two schemas with
+  // a `users` in each, and an unqualified name would read whichever the
+  // connection happens to default to.
   let browseSql = $derived(browseTableSql(database, table, browse.filter, browse.limit, qualify));
 
-  let rowCount = $derived(result?.status === "ok" ? (result.rows?.length ?? 0) : null);
+  let rowCount = $derived(result?.status === "ok" ? loadedRows.length : null);
+  // Whether a Load more (or a scroll to the bottom) would find anything.
+  // There is no COUNT(*) here to answer that honestly — a table browse asks
+  // for `browse.limit` rows a batch at a time, so getting back exactly that
+  // many is the only sign the last batch was not the final one; getting back
+  // fewer (or none) means it was. browse.limit tops out at 1000, the
+  // backend's own MaxRows, so a full batch never lies about there being no
+  // more because the adapter silently capped it short.
+  let hasMoreAfter = $derived(lastBatchSize !== null && lastBatchSize === browse.limit);
   let shownColumns = $derived(result?.status === "ok" ? (result.columns ?? []) : []);
-  let shownRows = $derived(
-    result?.status === "ok" ? ((result.rows ?? []) as (string | null)[][]) : [],
-  );
+  let shownRows = $derived(loadedRows);
   // The selection as the pane and the grid both see it: indices that still
   // point at a row, and those rows' cells in the same order. Filtering here
   // rather than trusting the state means a selection can never outlive the rows
@@ -241,6 +279,8 @@
       result = null;
       failure = null;
       shownSql = "";
+      loadedRows = [];
+      lastBatchSize = null;
     }
     loading = true;
     try {
@@ -251,13 +291,53 @@
       result = next;
       failure = null;
       shownSql = sql;
+      // A fresh batch replaces rather than appends — this is the offset-0
+      // fetch, so whatever this pane held before belongs to a different
+      // browse (or an earlier look at the same one). resultKey bumps here and
+      // nowhere else, which is what tells ResultsTable this is that moment
+      // rather than the next page of what was already on screen.
+      loadedRows = next.status === "ok" ? ((next.rows ?? []) as (string | null)[][]) : [];
+      lastBatchSize = next.status === "ok" ? loadedRows.length : null;
+      resultKey += 1;
     } catch (err) {
       if (request !== latestRequest) return;
       result = null;
       failure = String(err);
       shownSql = sql;
+      loadedRows = [];
+      lastBatchSize = null;
     } finally {
       if (request === latestRequest) loading = false;
+    }
+  }
+
+  // Fetches the next `browse.limit` rows starting where the accumulation
+  // left off, and appends them — never a replacement, so the human's scroll
+  // position, selection, and any pending edits on the rows already on screen
+  // all survive it untouched (edits and selection are only ever cleared on
+  // the replace path above). Silently leaves hasMoreAfter as it was on
+  // failure, rather than declaring the browse finished because one fetch
+  // did not land — a retry (another scroll, or the Load more button) is
+  // still on offer either way.
+  async function loadMore() {
+    if (!hasMoreAfter || loadingMore || loading) return;
+    const request = (latestRequest += 1);
+    const sql = browseTableSql(database, table, browse.filter, browse.limit, qualify, loadedRows.length);
+    loadingMore = true;
+    try {
+      const next = await read(profileName, sql);
+      // The browse target (or an unrelated replace fetch) may have moved on
+      // while this was in flight — appending onto an accumulation that no
+      // longer exists would be worse than dropping the batch.
+      if (request !== latestRequest) return;
+      if (next.status === "ok") {
+        const batch = (next.rows ?? []) as (string | null)[][];
+        loadedRows = [...loadedRows, ...batch];
+        lastBatchSize = batch.length;
+        result = next;
+      }
+    } finally {
+      if (request === latestRequest) loadingMore = false;
     }
   }
 
@@ -552,6 +632,10 @@
               editable={editable.editable}
               {readOnlyHint}
               onRowClick={(index, options) => pickRow(index, options)}
+              {hasMoreAfter}
+              {loadingMore}
+              onFetchAfter={loadMore}
+              {resultKey}
             />
           </div>
 

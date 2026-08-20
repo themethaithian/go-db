@@ -691,3 +691,60 @@ func TestRunQueryOnAnUnknownProfileIsUnjudged(t *testing.T) {
 		t.Errorf("message = %q, want it to name the Profile that is not there", got.Message)
 	}
 }
+
+// Paging belongs to the Engine whose answers are rows in a table. What a window
+// is, and which statements have one, is specified in internal/guard; what this
+// pins is the dispatch and the one thing the facade adds — the page size of a
+// statement with no LIMIT of its own is db.MaxRows, the cap that really bounded
+// the result on screen, which guard cannot name because internal/db imports it.
+func TestPagingPerEngine(t *testing.T) {
+	svc := newQueryFacade(t, dbtest.NewFakeDriver())
+
+	t.Run("a MySQL select with no limit is bounded by the driver's cap", func(t *testing.T) {
+		got := svc.PageWindow(db.EngineMySQL, "SELECT * FROM users")
+
+		if !got.Pageable {
+			t.Fatalf("PageWindow refused: %s", got.Reason)
+		}
+		if got.Size != db.MaxRows || got.Offset != 0 {
+			t.Errorf("window = %+v, want the first %d rows", got, db.MaxRows)
+		}
+	})
+
+	t.Run("the next page is the statement rewritten, and it is still a read", func(t *testing.T) {
+		got := svc.Repage(db.EngineMySQL, "SELECT * FROM users", db.MaxRows, db.MaxRows)
+
+		if !got.Pageable {
+			t.Fatalf("Repage refused: %s", got.Reason)
+		}
+		if !svc.Classify(db.EngineMySQL, got.SQL).IsRead() {
+			t.Errorf("the next page %q is not a read", got.SQL)
+		}
+	})
+
+	t.Run("an Engine whose answers are not rows has no window", func(t *testing.T) {
+		for _, engine := range []db.Engine{db.EngineRedis, db.EngineMongoDB} {
+			window := svc.PageWindow(engine, "GET user:1")
+			if window.Pageable {
+				t.Errorf("%s: window = %+v, want none", engine, window)
+			}
+			if window.Reason == "" {
+				t.Errorf("%s: no window and no reason", engine)
+			}
+			if next := svc.Repage(engine, "GET user:1", 10, 10); next.Pageable {
+				t.Errorf("%s: Repage produced %q", engine, next.SQL)
+			}
+		}
+	})
+
+	t.Run("an Engine go-db does not know has no window", func(t *testing.T) {
+		got := svc.PageWindow(db.Engine("postgres"), "SELECT 1")
+
+		if got.Pageable {
+			t.Fatalf("window = %+v, want none", got)
+		}
+		if !strings.Contains(got.Reason, "postgres") {
+			t.Errorf("reason = %q, want it to name the Engine", got.Reason)
+		}
+	})
+}

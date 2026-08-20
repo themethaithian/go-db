@@ -53,7 +53,13 @@ export function nextMongoBrowseLimit(limit: number): number | null {
 
 /**
  * The statement that browses one MySQL table: the qualified name, the
- * condition in force if there is one, and the row limit.
+ * condition in force if there is one, the row limit, and how far into the
+ * table to start (0 for the first page).
+ *
+ * OFFSET is left off at 0 rather than written as `OFFSET 0`: the common case
+ * is the first page, and a statement that says nothing about where it starts
+ * reads the same as it always has — anyone already relying on this SQL for
+ * offset-less browsing sees no difference.
  *
  * Kept here beside its two siblings rather than moved: it is the same decision
  * for a different Engine, and the three read better together than one of them
@@ -65,10 +71,12 @@ export function browseTableSql(
   filter: string,
   limit: number,
   qualify: (database: string, table: string) => string,
+  offset = 0,
 ): string {
   const condition = filter.trim();
   const where = condition === "" ? "" : ` WHERE ${condition}`;
-  return `SELECT * FROM ${qualify(database, table)}${where} LIMIT ${limit}`;
+  const from = offset > 0 ? ` OFFSET ${offset}` : "";
+  return `SELECT * FROM ${qualify(database, table)}${where} LIMIT ${limit}${from}`;
 }
 
 /**

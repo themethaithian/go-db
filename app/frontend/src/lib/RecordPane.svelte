@@ -29,10 +29,13 @@
   // this is the surface that already shows one row's every column with room to
   // type in, and the grid's own click already means "pick this row", so putting
   // the caret in the grid would have meant dismantling a comparison to open an
-  // editor. A field turns into an input on double-click (or the pencil), Enter
-  // commits the edit locally and Esc drops it, and the value stays marked until
-  // the save that takes it through the Approval Gate. Nothing here writes
-  // anything: it hands the typed value to RowEdits and stops.
+  // editor. A field turns into an input on double-click (or the pencil), and
+  // every keystroke is live in RowEdits from there — there is no separate
+  // commit, so Enter and clicking away just close the box, and Esc undoes
+  // this session's typing rather than the field's whole edit. The value stays
+  // marked, old value visible alongside it, until the save that takes it
+  // through the Approval Gate. Nothing here writes anything: it hands the
+  // typed value to RowEdits and stops.
   import type { RowEdits } from "./edits.svelte";
   import type { CellValue } from "./mutate";
 
@@ -92,9 +95,22 @@
 
   // The field open for typing, as the grid row it belongs to and its column,
   // and the text in the box. One at a time: this is a field editor, not a
-  // form, and a commit is one keypress away.
+  // form.
+  //
+  // Unlike the grid's own in-cell editor (ResultsTable), there is no commit
+  // gesture here — every keystroke writes straight to RowEdits, so the dirty
+  // mark and the diff line below are live while you type, and Enter/blur only
+  // close the box. That is a deliberate divergence, not a shortcut: the grid
+  // is a spreadsheet mid-paste, where Enter-to-commit and Esc-to-cancel are
+  // the whole point, while this pane is a single field with the width to show
+  // its own state changing as you go. `opened` is what makes Escape still
+  // mean something precise in a world with no commit step: it is the value
+  // this field held the instant the editor opened — already-dirty or still
+  // fetched — and Escape's job is to put exactly that back, undoing this
+  // session's keystrokes without disturbing an edit made in an earlier one.
   let editing = $state<{ row: number; column: string } | null>(null);
   let draft = $state("");
+  let opened = $state<string | null>(null);
 
   // The field name column, then one value column per picked row.
   //
@@ -152,22 +168,30 @@
     timer = setTimeout(() => (copied = null), COPIED_MS);
   }
 
-  // Opening a field for typing starts it on what the field shows — including
-  // an empty box on a NULL, which is how NULL is cleared: type nothing, press
-  // Enter, and the column holds the empty string rather than an absence.
+  // Opening a field for typing starts it on what the field shows — an empty
+  // box on a NULL. Opening and closing without typing records nothing: only
+  // an input event reaches RowEdits, so looking inside a field can never
+  // quietly edit it. (Turning a NULL into the empty string therefore takes an
+  // actual keystroke — type and delete — which is the rarer intent by far.)
+  // `current` is also the session's own baseline: it is whatever the field
+  // held a moment ago, dirty or not, and Escape below puts it straight back.
   function startEdit(row: number, column: string, current: string | null) {
     if (!editable || edits === null) return;
     editing = { row, column };
     draft = current ?? "";
+    opened = current;
   }
 
-  // Commits what is in the box as a pending edit. `fetched` is what the
-  // database gave for this cell, so an edit that lands back on it is recorded
-  // as no edit at all rather than as a change that changes nothing.
-  function commit(fetched: string | null) {
+  // Every keystroke lands here, live — this is the box's only path to
+  // RowEdits, and it runs on every `input` event rather than waiting for a
+  // commit that no longer exists. `edits.set` already treats typing back the
+  // fetched value as taking the edit away rather than as an edit that changes
+  // nothing, so a field that ends up matching the database again simply stops
+  // being dirty as you type, with no revert gesture needed.
+  function typed(event: Event, fetched: string | null) {
     const cell = editing;
     if (cell === null || edits === null) return;
-    editing = null;
+    draft = (event.currentTarget as HTMLInputElement).value;
     edits.set(cell.row, cell.column, draft, fetched);
   }
 
@@ -178,18 +202,41 @@
     edits.set(cell.row, cell.column, null, fetched);
   }
 
-  // Enter commits, Escape drops the edit. Escape stops here rather than
-  // bubbling: the same key closes the whole pane (RecordPaneDock listens on
-  // the window), and leaving a field editor should not also clear the
-  // selection behind it.
+  // Nothing left to commit by the time either of these fires — typed() above
+  // already wrote the live value — so both just close the box.
+  function closeEdit() {
+    editing = null;
+  }
+
+  // Escape's job is narrower than the grid's: it undoes what was typed in
+  // this one session, not the field's whole edit. Setting the cell back to
+  // `opened` does that in one call — landing on the fetched value clears the
+  // edit through the same path typing does, and landing on an earlier
+  // session's edit quietly restores it — either way the box then closes on a
+  // field left exactly as it was found.
+  function cancelEdit(fetched: string | null) {
+    const cell = editing;
+    if (cell === null || edits === null) {
+      editing = null;
+      return;
+    }
+    editing = null;
+    edits.set(cell.row, cell.column, opened, fetched);
+  }
+
+  // Enter and Escape both just close the box now — the difference is what,
+  // if anything, gets put back first. Escape stops here rather than bubbling:
+  // the same key closes the whole pane (RecordPaneDock listens on the
+  // window), and leaving a field editor should not also clear the selection
+  // behind it.
   function handleEditKey(event: KeyboardEvent, fetched: string | null) {
     if (event.key === "Enter") {
       event.preventDefault();
-      commit(fetched);
+      closeEdit();
     } else if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      editing = null;
+      cancelEdit(fetched);
     }
   }
 
@@ -264,7 +311,14 @@
   </button>
 </div>
 
-<div class="min-h-0 flex-1 overflow-auto">
+<!-- bg-surface here, not just on the aside that docks this pane: the aside's
+     own background is enough in the ordinary case, but this is the region
+     that actually scrolls, and the one a stray stacking-context escape
+     elsewhere (the grid's own sticky, z-indexed header, chiefly) would paint
+     through first if this component ever ends up beside something that isn't
+     as carefully contained as it should be. Owning its own opaque backdrop is
+     cheap insurance that does not depend on that staying true. -->
+<div class="min-h-0 flex-1 overflow-auto bg-surface">
   <!-- Comparing lays the grid out at its content's width (and never less than
        the pane's); one row wraps inside the pane instead, which is why only
        the comparison asks to be as wide as it needs. -->
@@ -337,18 +391,22 @@
                  in. NULL keeps its own place at the end of the same line. -->
             <input
               class="h-6 min-w-0 flex-1 rounded-control border border-accent bg-surface-panel px-2 font-mono text-base leading-6 text-text focus:outline-none"
-              bind:value={draft}
+              value={draft}
               use:openEditor
+              oninput={(event) => typed(event, fetched)}
               onkeydown={(event) => handleEditKey(event, fetched)}
-              onblur={() => commit(fetched)}
+              onblur={closeEdit}
               spellcheck="false"
               autocapitalize="off"
               autocomplete="off"
               aria-label="Edit {column}"
             />
-            <!-- Set NULL takes the focus away from the box, which would
-                 otherwise commit what is in it first; holding the mousedown
-                 keeps the caret where it is so the click means only this. -->
+            <!-- Set NULL takes the focus away from the box, and a native blur
+                 fires first and closes the editor — which would make `editing`
+                 null before this button's own click ever runs, and the click
+                 would find no field to act on. Holding the mousedown keeps
+                 the caret (and the editor) where it is so the click still
+                 lands on something. -->
             <button
               type="button"
               class="flex h-6 shrink-0 items-center rounded-control border border-border bg-surface-raised px-1.5 text-xs font-medium text-text-muted transition-colors hover:border-border-strong hover:text-text"
@@ -366,9 +424,48 @@
                  rather than running off the edge, but only once the column is
                  genuinely too narrow for it, which at the pane's own widths it
                  no longer is. -->
+            <!-- overflow-hidden is the containment fix, not the wrapping one:
+                 break-words already lets a long value wrap and grow this row
+                 as many lines as it needs, and that growth is untouched here.
+                 What it stops is the case wrapping does not cover — a tall
+                 script's fallback glyphs (Thai's, chiefly) rendering taller
+                 than this line's own box, which nothing clips by default, so
+                 the excess ink used to paint straight through into whichever
+                 field row sits underneath. Clipped at this span's own edge
+                 instead, it stays a property of this one value. -->
             <span
-              class="min-w-0 max-w-value flex-1 font-mono text-base leading-6 text-text break-words"
+              class="min-w-0 max-w-value flex-1 overflow-hidden font-mono text-base leading-6 text-text break-words"
             >
+              {#if dirty}
+                <!-- What did I change, answered without the row growing a
+                     second line: the old value sits inline, ahead of the
+                     new one, struck through and capped at a fixed width of
+                     its own so a long fetched value truncates rather than
+                     pushing the new one around. It only appears here, on
+                     the at-rest row — the editor branch above is this same
+                     field's other rendering of "what it currently holds",
+                     and showing the old value twice (once beside the input,
+                     once beside this) would just be the same fact stated
+                     two ways in the one row. The input already answers "old
+                     vs new" well enough on its own: it opens pre-selected
+                     over the current value, which is the fetched value the
+                     first time and is this old-value line's twin the rest
+                     of the time. -->
+                {#if fetched === null}
+                  <span
+                    class="mr-1.5 inline-flex h-3.5 items-center rounded-control border border-border/60 bg-surface-raised px-1 align-middle font-sans text-[10px] font-medium tracking-wide text-text-subtle/70 line-through"
+                  >
+                    NULL
+                  </span>
+                {:else}
+                  <span
+                    class="mr-1.5 inline-block max-w-[6rem] truncate align-middle text-xs text-text-subtle/70 line-through"
+                    title={fetched}
+                  >
+                    {fetched}
+                  </span>
+                {/if}
+              {/if}
               {#if value === null}
                 <!-- An absence, drawn as a thing rather than as the four
                      letters — a column whose value is the string "NULL" must
@@ -419,12 +516,19 @@
                 </button>
               {/if}
               {#if dirty}
+                <!-- Ghost like the pencil and the copy button beside it, on
+                     purpose: a revert drawn in the accent color read as the
+                     row's "confirm" button, which is the opposite of what it
+                     does. Undo earns its own glyph — a plain counterclockwise
+                     arrow, nothing that could be mistaken for a checkmark —
+                     and nothing else about it, so the loudest thing in a
+                     dirty row is the dirty tint, not this button. -->
                 <button
                   type="button"
-                  class="flex h-6 w-6 items-center justify-center rounded-control border border-accent/40 bg-surface-raised text-accent transition-colors hover:bg-accent/15"
+                  class="flex h-6 w-6 items-center justify-center rounded-control border border-border bg-surface-raised text-text-subtle transition-colors hover:border-border-strong hover:text-text"
                   onclick={() => edits?.revertCell(at, column)}
-                  title="Undo this edit"
-                  aria-label="Undo this edit"
+                  title="Revert this field"
+                  aria-label="Revert this field"
                 >
                   <svg
                     class="h-3.5 w-3.5"
@@ -436,8 +540,8 @@
                     stroke-linejoin="round"
                     aria-hidden="true"
                   >
-                    <path d="M9.75 8.5a3.5 3.5 0 0 0-3.5-3.5H2.5" />
-                    <path d="M4.25 2.75 2 5l2.25 2.25" />
+                    <path d="M0.5 2v3h3" />
+                    <path d="M1.755 7.5a4.5 4.5 0 1 0 1.065-4.68L0.5 5" />
                   </svg>
                 </button>
               {/if}

@@ -143,6 +143,30 @@ func (s *AppService) SplitStatements(engine db.Engine, buffer string) []guard.St
 	return splitFor(engine, buffer)
 }
 
+// PageWindow reports the window of rows statement asks for on engine — whether
+// it can be paged at all, and which rows the human is currently looking at.
+//
+// It is what the editor asks after a statement has run, to decide whether to
+// offer the next page. Nothing is executed and nothing is connected to.
+//
+// A statement carrying no LIMIT of its own was bounded by db.MaxRows, so that
+// is the page size reported for it: the cap that really cut the result short is
+// the one the next page has to start after.
+func (s *AppService) PageWindow(engine db.Engine, statement string) guard.Window {
+	return pageWindowFor(engine, statement)
+}
+
+// Repage returns statement rewritten to ask for a different window of rows:
+// size of them, starting after offset.
+//
+// The editor runs what comes back through RunQuery like any other statement, so
+// the Approval Gate and the audit log see the text that really executes. Paging
+// is a rewrite the human could have typed, not a private instruction to the
+// driver, and that is what keeps it from being a way around the gate.
+func (s *AppService) Repage(engine db.Engine, statement string, size, offset int64) guard.Window {
+	return repageFor(engine, statement, size, offset)
+}
+
 // RunQuery submits one query on the named Profile and database, on behalf of
 // origin.
 //

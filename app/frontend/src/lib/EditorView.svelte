@@ -66,7 +66,14 @@
   import { mentionedTables, type CompletionSchema } from "./completion";
   import { RowEdits } from "./edits.svelte";
   import { editability, selectTarget } from "./mutate";
-  import { Classify, RunQuery, CancelPending, SplitStatements } from "../../wailsjs/go/app/App";
+  import {
+    Classify,
+    RunQuery,
+    CancelPending,
+    SplitStatements,
+    PageWindow,
+    Repage,
+  } from "../../wailsjs/go/app/App";
   import type { guard, service } from "../../wailsjs/go/models";
 
   let {
@@ -132,20 +139,63 @@
 
   // The statement behind what the Results pane is showing — recorded from the
   // run that produced it, never from the cursor's current whereabouts, so the
-  // caption is a record rather than a promise.
+  // caption is a record rather than a promise. This is always the statement
+  // as first run: loadMore below walks pageWindow forward through Repage
+  // without ever touching ranSql, so it stays the one statement rerun()
+  // replays and the one Repage keeps rewriting from.
   let ranSql = $state("");
+
+  // The Approval Gate's read of ranSql's own paging: whether it is exactly
+  // one plain read-only top-level SELECT, and if so its page size — and,
+  // after loadMore, the offset of the *last* batch fetched rather than the
+  // first. Re-read after every ordinary run — a run can turn a paged SELECT
+  // into an unrelated statement, or the reverse, and a window carried
+  // forward from the last one would offer Load more over rows nobody asked
+  // for. null covers both "not pageable" and "nothing has run yet"; there is
+  // nothing a pager could do with either.
+  let pageWindow = $state<guard.Window | null>(null);
 
   // The picked rows, as indices into the rows on screen and in the order they
   // were picked — that order is the order of the record pane's value
   // columns. Empty means the pane is closed. Every run clears it, the same
   // way a fresh fetch does in the Explorer: an index means nothing against a
-  // result set it was not taken from.
+  // result set it was not taken from. An appended batch (loadMore) leaves it
+  // alone — the rows it points at never moved.
   let selectedRows = $state<number[]>([]);
 
   let shownColumns = $derived(result?.status === "ok" ? (result.columns ?? []) : []);
-  let shownRows = $derived(
-    result?.status === "ok" ? ((result.rows ?? []) as (string | null)[][]) : [],
+
+  // The rows accumulated across every batch fetched for `ranSql` — the first
+  // run's, plus whatever loadMore has appended since. Replaced wholesale only
+  // by execute() (an ordinary run or a rerun); loadMore only ever grows it.
+  let loadedRows = $state<(string | null)[][]>([]);
+  let shownRows = $derived(loadedRows);
+
+  // How many rows the most recent batch itself returned — not the running
+  // total in loadedRows — since hasMoreAfter has to ask about the *last*
+  // fetch, the same way TableBrowse's own hasMoreAfter does.
+  let lastBatchSize = $state<number | null>(null);
+
+  // Bumped only by execute() — never by loadMore — so ResultsTable can tell a
+  // brand new run from the next appended batch of the one already on screen.
+  // See ResultsTable's own `resultKey` doc for why this has to be an explicit
+  // counter rather than something inferred from `rows` itself.
+  let resultKey = $state(0);
+
+  // True while loadMore's own fetch is in flight — handed to ResultsTable so
+  // its footer button reads "Loading…" and a second scroll-triggered fetch
+  // cannot stack behind this one. `running` covers the ordinary Run/rerun
+  // path; this is loadMore's equivalent of it.
+  let loadingMore = $state(false);
+
+  // A full window is the only sign there may be more rows past this batch —
+  // the same honest rule TableBrowse's own hasMoreAfter uses, and it composes
+  // with the backend's own truncation cap because that cap is exactly the
+  // default window size.
+  let hasMoreAfter = $derived(
+    pageWindow !== null && lastBatchSize !== null && lastBatchSize === pageWindow.size,
   );
+
   // The selection as the pane and the grid both see it: indices that still
   // point at a row, and those rows' cells in the same order.
   let pickedIndices = $derived(selectedRows.filter((index) => shownRows[index] !== undefined));
@@ -465,7 +515,15 @@
 
   // Runs the statement the Results pane is already showing again — what a
   // finished save does, so the grid shows what was persisted rather than what
-  // was typed. It is the same read that produced the rows in the first place.
+  // was typed. It is the same read that produced the rows in the first
+  // place, and ranSql is always that original statement (loadMore never
+  // rewrites it) — so this is a decision as much as a call: a rerun starts
+  // the accumulation over from its first window rather than replaying every
+  // batch the human had scrolled through. That is deliberate. A rerun after
+  // an edit is a fresh look at the table, not a request to reconstruct
+  // exactly how far a scroll happened to reach a moment ago — and replaying N
+  // appended pages to get there would be N more gate-visible, audited queries
+  // for a save that already was one.
   async function rerun() {
     if (profileName === null || ranSql === "" || running) return;
     await execute(profileName, database, ranSql);
@@ -473,7 +531,8 @@
 
   // The Profile and database are passed in rather than read here: a run is
   // aimed at where the human was when they started it, and an await in the
-  // middle is long enough for either to change.
+  // middle is long enough for either to change. Always a replace — loadMore
+  // below is the only append path, and it does not go through this.
   async function execute(profile: string, schema: string, statement: string) {
     running = true;
     // Rows picked out of the old result set cannot survive a new one — the
@@ -485,8 +544,74 @@
     try {
       result = await RunQuery(profile, schema, statement);
       ranSql = statement;
+      const rows = result.status === "ok" ? ((result.rows ?? []) as (string | null)[][]) : [];
+      loadedRows = rows;
+      lastBatchSize = result.status === "ok" ? rows.length : null;
+      // A fresh run replaces the accumulation, so this — and only this — is
+      // the moment ResultsTable's scroll should reset to the top.
+      resultKey += 1;
+      // Only the rows arm ever has a window to page — DocumentsView and
+      // ValueView (ADR-0006) have no offset of their own for Repage to move,
+      // and a result that isn't "ok" at all has no statement worth asking
+      // the gate to re-page.
+      pageWindow =
+        result.status === "ok" && result.documents === undefined && result.value === undefined
+          ? await pageWindowFor(profile, statement)
+          : null;
     } finally {
       running = false;
+    }
+  }
+
+  // PageWindow's own pageable/not-pageable split, collapsed to a Window worth
+  // keeping or nothing: not pageable is the common case — anything but a
+  // single plain read-only top-level SELECT — and there is nothing a pager
+  // could do with the reason it comes with, so it is discarded here rather
+  // than carried into state nobody reads.
+  async function pageWindowFor(profile: string, statement: string): Promise<guard.Window | null> {
+    const window = await PageWindow(engineOf(profile), statement);
+    return window.pageable ? window : null;
+  }
+
+  // Fetches the batch past the one already loaded and appends it — never a
+  // replacement, so the human's scroll position, selection, and any pending
+  // edits on the rows already on screen all survive it. Repage rewrites
+  // `ranSql` — always the *original* statement, never one already rewritten
+  // by an earlier append — to the next window, and RunQuery runs that
+  // rewritten SQL through the ordinary gate/audit path, exactly as a typed
+  // statement would; the classifier and the AuditLog see it. pageWindow is
+  // then advanced locally by one window's worth rather than re-read from
+  // PageWindow, since Repage already tells us exactly what window it wrote
+  // into the SQL it handed back.
+  //
+  // profile/schema/statement/window are captured before the two awaits below
+  // for the same reason execute()'s own parameters are: a scroll (or a
+  // click) is aimed at where the human was when it fired, and any of the
+  // three — or the tab itself — could change before Repage or RunQuery
+  // answers. Both awaits re-check afterwards, since either can outlast a tab
+  // switch on its own.
+  async function loadMore() {
+    const profile = profileName;
+    if (profile === null || pageWindow === null || running || loadingMore || !hasMoreAfter) return;
+    const schema = database;
+    const statement = ranSql;
+    const window = pageWindow;
+    loadingMore = true;
+    try {
+      const next = await Repage(engineOf(profile), statement, window.size, window.offset + window.size);
+      if (!next.pageable || next.sql === undefined) return;
+      if (profileName !== profile || database !== schema || ranSql !== statement || running) return;
+      const batchResult = await RunQuery(profile, schema, next.sql);
+      if (profileName !== profile || database !== schema || ranSql !== statement || running) return;
+      if (batchResult.status === "ok") {
+        const batch = (batchResult.rows ?? []) as (string | null)[][];
+        loadedRows = [...loadedRows, ...batch];
+        lastBatchSize = batch.length;
+        result = batchResult;
+        pageWindow = { ...window, offset: window.offset + window.size };
+      }
+    } finally {
+      loadingMore = false;
     }
   }
 
@@ -588,6 +713,9 @@
     untrack(() => {
       result = null;
       ranSql = "";
+      pageWindow = null;
+      loadedRows = [];
+      lastBatchSize = null;
       selectedRows = [];
       edits.abandon();
       edits.revert();
@@ -1122,6 +1250,10 @@
                   editable={editable.editable}
                   {readOnlyHint}
                   onRowClick={(index, options) => pickRow(index, options)}
+                  {hasMoreAfter}
+                  {loadingMore}
+                  onFetchAfter={loadMore}
+                  {resultKey}
                 />
               </div>
 

@@ -79,6 +79,43 @@ func wholeBuffer(buffer string) []guard.StatementSpan {
 	return []guard.StatementSpan{{Start: start, End: start + len(text), Text: text}}
 }
 
+// pageWindowFor reads the window of rows a statement asks for, and repageFor
+// moves it, in the language the Engine's answers come back in.
+//
+// Only MySQL is paged. A window is LIMIT and OFFSET over a table of rows, and
+// that is what a SQL result is; a Redis reply is one typed value, with no rows
+// to take a second screenful of, and MongoDB's own skip and limit are the
+// Engine's to add when its editor paging is written. Both refuse in the shape
+// every refusal here takes — no window, and a line saying why — so the editor
+// hides its pager rather than drawing one that cannot move.
+//
+// The default page size is db.MaxRows, and it is supplied here rather than in
+// guard because internal/db imports guard and not the other way round. It has
+// to be the cap that really bounded the result: a statement with no LIMIT
+// returned exactly that many rows, and the next page starts after them.
+func pageWindowFor(engine db.Engine, statement string) guard.Window {
+	if engine == db.EngineMySQL {
+		return guard.PageWindow(statement, db.MaxRows)
+	}
+	return guard.NoWindow(cannotPage(engine))
+}
+
+func repageFor(engine db.Engine, statement string, size, offset int64) guard.Window {
+	if engine == db.EngineMySQL {
+		return guard.Repage(statement, size, offset)
+	}
+	return guard.NoWindow(cannotPage(engine))
+}
+
+// cannotPage says why an Engine's answer has no next page, for the human whose
+// pager is not there.
+func cannotPage(engine db.Engine) string {
+	if !engine.Valid() {
+		return fmt.Sprintf("go-db does not know the %q engine this Profile names, so it cannot page its answers", engine)
+	}
+	return fmt.Sprintf("go-db does not page %s answers yet", engineName(engine))
+}
+
 // engineFor resolves the Engine of the Profile a query names.
 //
 // The Engine comes from the saved Profile and never from the caller, and that

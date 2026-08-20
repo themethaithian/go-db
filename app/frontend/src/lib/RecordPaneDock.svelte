@@ -109,9 +109,17 @@
 
   <!-- The picked rows, read down instead of across: the shape you want the
        moment a table has more columns than the window has width — and, with
-       more than one row picked, side by side. -->
+       more than one row picked, side by side.
+
+       isolate draws the same stacking-context boundary here as ResultsTable
+       draws around itself: the comparison header's own sticky, z-indexed
+       cells (RecordPane's corner and per-row index badges) stay contained to
+       this pane instead of being free to out-rank whatever sits beside it —
+       the grid included — in some shared ancestor stacking context. Neither
+       side should have to stay bug-free for the other to render correctly;
+       each contains its own. -->
   <aside
-    class="flex shrink-0 flex-col overflow-hidden border-l border-border bg-surface"
+    class="isolate flex shrink-0 flex-col overflow-hidden border-l border-border bg-surface"
     style="width: {detailWidth}px"
   >
     <RecordPane

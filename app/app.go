@@ -163,6 +163,28 @@ func (a *App) SplitStatements(engine, buffer string) []guard.StatementSpan {
 	return a.svc.SplitStatements(db.Engine(engine), buffer)
 }
 
+// PageWindow reports the window of rows statement asks for on engine: whether
+// it can be paged at all, and which rows the result on screen is. The editor
+// calls it with the statement it just ran, to decide whether to offer a next
+// page and where that page begins.
+//
+// A statement with no LIMIT of its own was cut short at the driver's cap, and
+// the window says so — the size it reports is the number of rows the human is
+// looking at, not an unbounded one.
+//
+// The Engine crosses as a plain string for the reason Classify's does.
+func (a *App) PageWindow(engine, statement string) guard.Window {
+	return a.svc.PageWindow(db.Engine(engine), statement)
+}
+
+// Repage returns statement rewritten to ask for size rows starting after
+// offset, for the editor's page buttons. It runs nothing: what comes back is
+// SQL the editor submits through RunQuery like any statement the human typed,
+// so the Approval Gate and the audit log see the text that really executes.
+func (a *App) Repage(engine, statement string, size, offset int64) guard.Window {
+	return a.svc.Repage(db.Engine(engine), statement, size, offset)
+}
+
 // RunQuery submits sql on the named Profile and database from the SQL editor.
 // The editor is the human Origin — an AI query arrives only through the MCP
 // server, which is not wired in yet — so this binding hardcodes

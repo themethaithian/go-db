@@ -47,6 +47,23 @@
 // holding two calls — is a mutation, and says which grammar it was measured
 // against.
 //
+// # Paging
+//
+// PageWindow reads the window of rows one statement asks for — its own LIMIT
+// and OFFSET, or the driver's cap when it has neither — and Repage writes the
+// same statement back out asking for a different one. Only a plain single
+// SELECT the classifier proves read-only has a window; a mutation, SHOW, a set
+// operation, a statement that will not parse and a LIMIT that is not a plain
+// number all say they have none, and why.
+//
+// The rewrite produces SQL rather than an instruction to the driver, and that
+// is the point: the editor submits the next page through the same RunQuery path
+// as anything a human typed, so the classifier, the gate and the audit log see
+// the statement that really executes. Only the outermost LIMIT moves — a LIMIT
+// inside a derived table, a subquery or a CTE body is part of what the
+// statement means — and the result is submitted back to Classify before it is
+// returned, on the same grounds the preview rewrite is.
+//
 // # Impact Preview
 //
 // PlanPreview rewrites a mutation into the reads that describe it — a COUNT and

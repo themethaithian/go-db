@@ -49,8 +49,23 @@
   --font-sans:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
     Helvetica, Arial, sans-serif;
+  /*
+   * No font in the mono stack above carries Thai glyphs, and there is no
+   * Thai monospace font on macOS to add one that would — so without a
+   * named fallback, the platform quietly substitutes its default Thai UI
+   * font per glyph once it exhausts the list, and it picks that
+   * substitute only after trying every name here in order. Naming
+   * Thonburi (macOS's system Thai font) ourselves, before the generic
+   * `monospace` keyword, makes that substitution a choice instead of an
+   * accident: the same font renders every time, rather than whatever the
+   * generic keyword happens to resolve to on a given machine. It does not
+   * shrink Thonburi's own metrics — those stay taller than SF Mono's, which
+   * is what the line-height/overflow handling on value text is for — but a
+   * known, consistent font is what makes that handling possible to reason
+   * about at all.
+   */
   --font-mono:
-    "SF Mono", Menlo, Monaco, "Cascadia Mono", Consolas, monospace;
+    "SF Mono", Menlo, Monaco, "Cascadia Mono", Consolas, Thonburi, monospace;
 
   /* 11 / 12 / 13 base / 14 / 15 / 17 — one step per role, no more */
   --text-xs: 0.6875rem;

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
@@ -80,12 +81,43 @@ func (redisDriver) Open(ctx context.Context, profile Profile, password string, d
 		DialerRetries: 1,
 	}
 
+	// Transport encryption, or nil for a plaintext connection — the Profile
+	// decides, and it decides the same way for every Engine. go-redis reads
+	// this field in the dialler it builds for itself, which is the one used
+	// when a Profile has no tunnel.
+	secure := profile.tlsConfig()
+	options.TLSConfig = secure
+
 	if dial != nil {
 		// Every connection in the pool goes this way, including ones opened
 		// later as the pool grows, and go-redis has no path around a Dialer it
 		// was given: a tunnelled Profile cannot quietly connect direct.
 		options.Dialer = func(ctx context.Context, _, address string) (net.Conn, error) {
-			return dial(ctx, address)
+			socket, err := dial(ctx, address)
+			if err != nil {
+				return nil, err
+			}
+			if secure == nil {
+				return socket, nil
+			}
+
+			// The wrap is ours because go-redis's is not: TLSConfig is applied
+			// only inside redis.NewDialer, the dialler go-redis builds when it
+			// was given none, and a Dialer of our own is used exactly as
+			// handed over. Left to the library, a tunnelled TLS Profile would
+			// send plaintext RESP at a TLS port and read the failure as the
+			// server being broken.
+			//
+			// The handshake is completed here rather than left to the first
+			// read, so a certificate this end will not accept is reported by
+			// the dial that caused it instead of by whatever command happened
+			// to run next.
+			encrypted := tls.Client(socket, secure)
+			if err := encrypted.HandshakeContext(ctx); err != nil {
+				encrypted.Close() //nolint:errcheck // nothing was usable; the close is cleanup
+				return nil, err
+			}
+			return encrypted, nil
 		}
 	}
 
@@ -544,6 +576,17 @@ func redisError(err error) error {
 	// does not know there is one. Its wording is the honest one; keep it.
 	if errors.Is(err, ErrSSHAuthFailed) || errors.Is(err, ErrSSHHostKey) || errors.Is(err, ErrUnreachable) {
 		return err
+	}
+
+	// A certificate this end would not accept is a third outcome, and it is
+	// kept as one rather than folded into either of the two above: the server
+	// answered, and it rejected nothing. It is checked before unreachable
+	// below because a handshake failure can arrive wrapped in a network error
+	// — the connection is being torn down, after all — and "unreachable" would
+	// bury the one sentence that names the fix. certificateRejected says the
+	// rest.
+	if certificateRejected(err) {
+		return fmt.Errorf("db: the server's TLS certificate was not accepted: %w", err)
 	}
 
 	// redis.Nil is an error reply as far as the client is concerned, and an

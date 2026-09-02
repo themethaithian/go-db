@@ -68,6 +68,16 @@ func (mysqlDriver) Open(ctx context.Context, profile Profile, password string, d
 	cfg.DBName = profile.Database
 	cfg.Timeout = dialTimeout
 
+	// Transport encryption, or nil for a plaintext connection — the Profile
+	// decides, and it decides the same way for every Engine.
+	//
+	// It is set on the config rather than wrapped around the dialler because
+	// MySQL negotiates TLS inside its own protocol: the driver reads the
+	// server's greeting on whatever connection it was handed and upgrades that
+	// one, so a tunnelled Profile gets TLS to the database at the far end
+	// rather than to the tunnel.
+	cfg.TLS = profile.tlsConfig()
+
 	if dial != nil {
 		// The driver's per-connection dialler, rather than a globally
 		// registered network name: a registration keyed by name is process-wide
@@ -244,6 +254,12 @@ func classify(err error) error {
 	// does not know there is one. Its wording is the honest one; keep it.
 	if errors.Is(err, ErrSSHAuthFailed) || errors.Is(err, ErrSSHHostKey) || errors.Is(err, ErrUnreachable) {
 		return err
+	}
+
+	// A certificate this end would not accept, kept as its own outcome rather
+	// than folded into either classified one. certificateRejected says why.
+	if certificateRejected(err) {
+		return fmt.Errorf("db: the server's TLS certificate was not accepted: %w", err)
 	}
 
 	var serverErr *mysql.MySQLError

@@ -21,7 +21,7 @@ The gate's policy for AI-originated mutating queries: the query waits in a visib
 _Avoid_: approval queue (as a UI term), pending list
 
 **Profile**:
-A saved, named description of how to reach one database: host, credentials reference, and optional SSH tunnel. Profiles are the only way any Origin names a database — the MCP server pins one explicitly; the editor selects one.
+A saved, named description of how to reach one database: host, credentials reference, an optional SSH tunnel, and optional TLS. Profiles are the only way any Origin names a database — the MCP server pins one explicitly; the editor selects one.
 _Avoid_: connection (for the saved config), datasource
 
 **Connection Registry**:

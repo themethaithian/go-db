@@ -107,3 +107,73 @@ func TestSaveWithUnsetEnginePersistsMySQLInTheFile(t *testing.T) {
 		t.Errorf("Engine = %q, want %q", got.Engine, db.EngineMySQL)
 	}
 }
+
+// These three pin how a Profile's optional TLS survives the file. The empty
+// case is the one worth a test of its own: TLS on and verifying is written as
+// a table with no keys in it, and a Profile that came back with a nil TLS
+// would have quietly turned "encrypt this connection" into "do not".
+
+func TestSaveAndLoadRoundTripsTLSWithVerificationWaived(t *testing.T) {
+	store := db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain())
+	profile := db.Profile{Name: "p", Host: "db.internal", Engine: db.EngineRedis, TLS: &db.TLSSettings{SkipVerify: true}}
+
+	if err := store.Save(profile, ""); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get("p")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.TLS == nil {
+		t.Fatal("TLS = nil, want the settings that were saved")
+	}
+	if !got.TLS.SkipVerify {
+		t.Error("SkipVerify = false, want true — the Profile waived verification and the file lost it")
+	}
+}
+
+func TestSaveAndLoadRoundTripsTLSWithVerificationOn(t *testing.T) {
+	store := db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain())
+	profile := db.Profile{Name: "p", Host: "db.internal", Engine: db.EngineRedis, TLS: &db.TLSSettings{}}
+
+	if err := store.Save(profile, ""); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get("p")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.TLS == nil {
+		t.Fatal("TLS = nil, want it present — every key in it is at its zero value, but the Profile still asked for TLS")
+	}
+	if got.TLS.SkipVerify {
+		t.Error("SkipVerify = true, want false — nothing waived verification")
+	}
+}
+
+func TestSaveWithNoTLSWritesNoTLSKey(t *testing.T) {
+	dir := t.TempDir()
+	store := db.NewProfileStore(dir, dbtest.NewFakeKeychain())
+
+	if err := store.Save(db.Profile{Name: "p", Host: "db.internal"}, ""); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "profiles.toml"))
+	if err != nil {
+		t.Fatalf("reading profiles.toml: %v", err)
+	}
+	if strings.Contains(string(data), "tls") {
+		t.Errorf("profiles.toml = %s, want no tls key at all for a Profile that asked for none", data)
+	}
+
+	got, err := store.Get("p")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.TLS != nil {
+		t.Errorf("TLS = %#v, want nil — the file said nothing about TLS", got.TLS)
+	}
+}

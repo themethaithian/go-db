@@ -136,6 +136,17 @@ func (mongoDriver) Open(ctx context.Context, profile Profile, password string, d
 		})
 	}
 
+	// Transport encryption, when the Profile asks for one — the same field,
+	// meaning the same thing, as it does on the other two Engines.
+	//
+	// The driver applies it on top of whatever dialler it has: it dials first
+	// and upgrades the connection it got back, its own and a custom one alike,
+	// so a tunnelled Profile gets TLS to the database at the far end rather
+	// than to the tunnel. Nothing has to be wrapped here.
+	if secure := profile.tlsConfig(); secure != nil {
+		settings.SetTLSConfig(secure)
+	}
+
 	if dial != nil {
 		// Every connection the driver opens goes this way, including the ones
 		// its topology monitor opens later, and there is no path around a
@@ -1012,6 +1023,12 @@ func mongoError(err error) error {
 	// does not know there is one. Its wording is the honest one; keep it.
 	if errors.Is(err, ErrSSHAuthFailed) || errors.Is(err, ErrSSHHostKey) || errors.Is(err, ErrUnreachable) {
 		return err
+	}
+
+	// A certificate this end would not accept, kept as its own outcome rather
+	// than folded into either classified one. certificateRejected says why.
+	if certificateRejected(err) {
+		return fmt.Errorf("db: the server's TLS certificate was not accepted: %w", err)
 	}
 
 	if serverErr := mongo.ServerError(nil); errors.As(err, &serverErr) {

@@ -219,6 +219,16 @@
             ssh
           </span>
         {/if}
+        {#if profile.TLS}
+          <span
+            class="shrink-0 rounded-full border border-border bg-surface-raised px-1.5 text-xs font-medium tracking-wide text-text-muted uppercase"
+            title={profile.TLS.SkipVerify
+              ? "Encrypted with TLS, certificate not verified"
+              : "Encrypted with TLS"}
+          >
+            tls
+          </span>
+        {/if}
       </span>
       <span class="truncate pl-3.5 font-mono text-xs text-text-subtle">
         {subtitle(profile)}

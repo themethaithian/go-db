@@ -73,6 +73,16 @@
     engine = next;
   }
 
+  // TLS section. A Profile with TLS on and nothing waived is still a shape
+  // of its own, distinct from a plaintext one (see Profile.TLS's own doc
+  // comment in internal/db/profile.go) — that is why this is an outer
+  // enabled checkbox with a nested skip-verify one, rather than a single
+  // toggle that conflates "encrypted" with "encrypted and unverified".
+  // Applies to every Engine alike; the backend wires it into all three
+  // drivers, so there is nothing here to gate on `engine`.
+  let tlsEnabled = $state(false);
+  let tlsSkipVerify = $state(false);
+
   // SSH tunnel section. sshPortInput is kept as a plain string (not a bound
   // number) so an emptied field reads back as "" rather than NaN; it is
   // parsed on submit, with empty treated as 0 so the backend's own default
@@ -182,6 +192,9 @@
     confirmingDelete = false;
     mcpPopoverOpen = false;
 
+    tlsEnabled = profile?.TLS != null;
+    tlsSkipVerify = profile?.TLS?.SkipVerify ?? false;
+
     sshEnabled = profile?.SSH != null;
     sshHost = profile?.SSH?.Host ?? "";
     sshPortInput = profile?.SSH?.Port ? String(profile.SSH.Port) : "";
@@ -219,6 +232,7 @@
       Database: database,
       Group: group.trim(),
       Engine: engine,
+      TLS: tlsEnabled ? new db.TLSSettings({ SkipVerify: tlsSkipVerify }) : undefined,
       SSH: sshEnabled
         ? new db.SSHTunnel({
             Host: sshHost,
@@ -442,6 +456,73 @@
           placeholder={isEditing ? "leave blank to keep the stored password" : "optional"}
         />
       </label>
+    </div>
+
+    <!-- TLS applies to every Engine — the backend wires it into all three
+         drivers alike — so, unlike the SSH card that follows, nothing here
+         is conditioned on `engine`. The outer checkbox exists because a
+         Profile with TLS on and nothing waived is still a distinct shape
+         from a plaintext one (Profile.TLS's own doc comment), not something
+         a single skip-verify toggle could say. -->
+    <div class="rounded-control border border-border bg-surface">
+      <label class="flex cursor-pointer items-center gap-2.5 px-3 py-2.5 text-base text-text">
+        <span class="relative flex h-4 w-4 shrink-0 items-center justify-center">
+          <input
+            type="checkbox"
+            class="h-4 w-4 cursor-pointer appearance-none rounded-sm border border-border bg-surface-raised transition-colors checked:border-accent checked:bg-accent hover:border-border-strong"
+            bind:checked={tlsEnabled}
+          />
+          {#if tlsEnabled}
+            <svg
+              class="pointer-events-none absolute h-2.5 w-2.5 text-white"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M2 6.25 4.75 9 10 3.25" />
+            </svg>
+          {/if}
+        </span>
+        <span>Encrypt the connection with TLS</span>
+      </label>
+
+      {#if tlsEnabled}
+        <div class="flex flex-col gap-2.5 border-t border-border px-3 py-4">
+          <label class="flex cursor-pointer items-center gap-2.5 text-base text-text">
+            <span class="relative flex h-4 w-4 shrink-0 items-center justify-center">
+              <input
+                type="checkbox"
+                class="h-4 w-4 cursor-pointer appearance-none rounded-sm border border-border bg-surface-raised transition-colors checked:border-accent checked:bg-accent hover:border-border-strong"
+                bind:checked={tlsSkipVerify}
+              />
+              {#if tlsSkipVerify}
+                <svg
+                  class="pointer-events-none absolute h-2.5 w-2.5 text-white"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M2 6.25 4.75 9 10 3.25" />
+                </svg>
+              {/if}
+            </span>
+            <span>Skip certificate verification</span>
+          </label>
+
+          <p class="text-xs text-text-subtle">
+            The connection stays encrypted, but the server isn't verified — use this only for self-signed or
+            internal-CA servers.
+          </p>
+        </div>
+      {/if}
     </div>
 
     <div class="rounded-control border border-border bg-surface">

@@ -428,6 +428,207 @@ func TestListTablesReportsAnEngineFailure(t *testing.T) {
 	}
 }
 
+// FindKeys is the search the tree's filter box cannot do for itself: the
+// keyspace is walked by the server, with the human's text carried in SCAN's
+// MATCH, so a key beyond the thousand the listing shows can still be found.
+//
+// What each case pins is the command line, because that is the whole of what
+// this method does differently: the pattern the text became, quoted so that the
+// argument Redis reads is the argument the human typed.
+func TestFindKeysSearchesTheServerWithMatch(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"plain text is a substring search", "user", `SCAN 0 MATCH "*user*" COUNT 10000`},
+		{"a glob is the pattern the human wrote", "user:*", `SCAN 0 MATCH "user:*" COUNT 10000`},
+		{"a space is inside the argument, not between two", "my key", `SCAN 0 MATCH "*my key*" COUNT 10000`},
+		{"a quote is escaped rather than closing the run", `say "hi"`, `SCAN 0 MATCH "*say \"hi\"*" COUNT 10000`},
+		{"a backslash is escaped for the glob and again for the line", `a\b`, `SCAN 0 MATCH "*a\\\\b*" COUNT 10000`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			svc, driver := newScriptedFacade(t, db.EngineRedis, "", func(string) (db.Result, error) {
+				return scanPage("0", "user:2", "user:1"), nil
+			})
+
+			got := svc.FindKeys(context.Background(), "store", "0", test.text)
+
+			if got.Status != service.SchemaOK {
+				t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+			}
+			if names := tableNames(got.Tables); !equalStrings(names, []string{"user:1", "user:2"}) {
+				t.Errorf("keys = %v, want the matches sorted by name", names)
+			}
+			if got.Truncated {
+				t.Error("Truncated = true on a search that reached cursor 0 under the cap")
+			}
+			if !strings.Contains(got.Message, "2 keys match") {
+				t.Errorf("message = %q, want it to say how many keys matched", got.Message)
+			}
+			if reads := driver.Reads(); len(reads) != 1 || reads[0] != test.want {
+				t.Errorf("the database was asked %v, want [%q]", reads, test.want)
+			}
+		})
+	}
+}
+
+// A search pages like a listing does, and the pattern goes out with every page.
+func TestFindKeysPagesTheSearch(t *testing.T) {
+	svc, driver := newScriptedFacade(t, db.EngineRedis, "", func(command string) (db.Result, error) {
+		switch command {
+		case `SCAN 0 MATCH "*user*" COUNT 10000`:
+			return scanPage("41", "user:1"), nil
+		case `SCAN 41 MATCH "*user*" COUNT 10000`:
+			return scanPage("0", "user:2", "user:1"), nil
+		}
+		return db.Result{}, fmt.Errorf("unscripted command %q", command)
+	})
+
+	got := svc.FindKeys(context.Background(), "store", "0", "user")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+	if names := tableNames(got.Tables); !equalStrings(names, []string{"user:1", "user:2"}) {
+		t.Errorf("keys = %v, want each match once", names)
+	}
+	if reads := driver.Reads(); len(reads) != 2 {
+		t.Errorf("the database was asked %v, want one SCAN per page", reads)
+	}
+}
+
+// More matches than the tree will show is one kind of short answer, and it says
+// the thing a human can act on: narrow the search.
+func TestFindKeysCapsTheMatches(t *testing.T) {
+	page := 0
+	svc, _ := newScriptedFacade(t, db.EngineRedis, "", func(string) (db.Result, error) {
+		keys := make([]string, 0, 400)
+		for i := 0; i < 400; i++ {
+			keys = append(keys, fmt.Sprintf("user:%06d", page*400+i))
+		}
+		page++
+		// The cursor never comes back to 0: there is always more.
+		return scanPage(fmt.Sprint(page), keys...), nil
+	})
+
+	got := svc.FindKeys(context.Background(), "store", "0", "user")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+	if len(got.Tables) != 1000 {
+		t.Errorf("keys = %d, want the cap of 1000", len(got.Tables))
+	}
+	if !got.Truncated {
+		t.Error("Truncated = false on a search with more matches than were shown")
+	}
+	if !strings.Contains(got.Message, "first") || !strings.Contains(got.Message, "more") {
+		t.Errorf("message = %q, want it to say there are more matches than these", got.Message)
+	}
+}
+
+// The other kind of short answer, and it means the opposite thing: not "there
+// are more of these" but "the key you are looking for may still be out there".
+// A search that stopped at the page bound has not seen the whole keyspace, and
+// a human who reads "3 keys match" would take it for the whole answer.
+func TestFindKeysStopsAtThePageBound(t *testing.T) {
+	page := 0
+	svc, driver := newScriptedFacade(t, db.EngineRedis, "", func(string) (db.Result, error) {
+		page++
+		// One match per page and a cursor that never comes home: the shape of a
+		// big keyspace where almost nothing matches.
+		return scanPage(fmt.Sprint(page), fmt.Sprintf("user:%06d", page)), nil
+	})
+
+	got := svc.FindKeys(context.Background(), "store", "0", "user")
+
+	if got.Status != service.SchemaOK {
+		t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaOK, got.Message)
+	}
+	if reads := driver.Reads(); len(reads) != 100 {
+		t.Errorf("the database was asked %d times, want the search bounded at 100 pages", len(reads))
+	}
+	if len(got.Tables) != 100 {
+		t.Errorf("keys = %d, want the one match from each of the 100 pages", len(got.Tables))
+	}
+	if !got.Truncated {
+		t.Error("Truncated = false on a search that never reached the end of the keyspace")
+	}
+	if strings.Contains(got.Message, "first") {
+		t.Errorf("message = %q, want it to say the keyspace was not fully searched rather than that these are the first of more", got.Message)
+	}
+	if !strings.Contains(got.Message, "not fully searched") {
+		t.Errorf("message = %q, want it to say the keyspace was not fully searched", got.Message)
+	}
+}
+
+// Searching the server for a name is Redis's. A MySQL schema comes back whole
+// and is filtered where it is shown, so the question is refused in those words
+// rather than asked and failed — and nothing is sent to the server.
+func TestFindKeysIsRefusedOffRedis(t *testing.T) {
+	for _, engine := range []db.Engine{db.EngineMySQL, db.EngineMongoDB} {
+		t.Run(string(engine), func(t *testing.T) {
+			svc, driver := newScriptedFacade(t, engine, "shop", func(string) (db.Result, error) {
+				return db.Result{}, fmt.Errorf("nothing should have been asked")
+			})
+
+			got := svc.FindKeys(context.Background(), "store", "shop", "user")
+
+			if got.Status != service.SchemaFailed {
+				t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaFailed, got.Message)
+			}
+			if got.Tables != nil {
+				t.Errorf("Tables = %v, want none", got.Tables)
+			}
+			if got.Message == "" {
+				t.Error("message is empty, want a line saying why there is no search to run")
+			}
+			if reads := driver.Reads(); len(reads) != 0 {
+				t.Errorf("the database was asked %v, want nothing asked at all", reads)
+			}
+		})
+	}
+}
+
+// Text with nothing in it is refused rather than turned into **, which would
+// walk the whole keyspace to answer a question nobody asked.
+func TestFindKeysRefusesBlankText(t *testing.T) {
+	for _, text := range []string{"", "   ", "\t"} {
+		t.Run(fmt.Sprintf("%q", text), func(t *testing.T) {
+			svc, driver := newScriptedFacade(t, db.EngineRedis, "", func(string) (db.Result, error) {
+				return db.Result{}, fmt.Errorf("nothing should have been asked")
+			})
+
+			got := svc.FindKeys(context.Background(), "store", "0", text)
+
+			if got.Status != service.SchemaFailed {
+				t.Fatalf("status = %q, want %q (message: %s)", got.Status, service.SchemaFailed, got.Message)
+			}
+			if got.Message == "" {
+				t.Error("message is empty, want a line saying there is nothing to search for")
+			}
+			if reads := driver.Reads(); len(reads) != 0 {
+				t.Errorf("the database was asked %v, want nothing asked at all", reads)
+			}
+		})
+	}
+}
+
+// A Profile with nowhere to ask answers the same way it does for the listing.
+func TestFindKeysOnADisconnectedProfile(t *testing.T) {
+	svc, _ := newScriptedFacade(t, db.EngineRedis, "", func(string) (db.Result, error) {
+		return db.Result{}, fmt.Errorf("nothing should have been asked")
+	})
+	if err := svc.Disconnect("store"); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+
+	if got := svc.FindKeys(context.Background(), "store", "0", "user"); got.Status != service.SchemaNotConnected {
+		t.Errorf("FindKeys status = %q, want %q (message: %s)", got.Status, service.SchemaNotConnected, got.Message)
+	}
+}
+
 // Columns and indexes are MySQL's. A Redis key has neither and a MongoDB
 // collection has no fixed ones, so the question is refused in those words
 // rather than asked and failed — and nothing is sent to the server.

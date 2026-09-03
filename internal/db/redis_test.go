@@ -164,6 +164,50 @@ func isRedisContainerLine(command string) bool {
 	return false
 }
 
+// TestQuoteRedisArgumentRoundTripsThroughTheTokenizer is the property the
+// quoter exists for, and the only one worth asserting: whatever bytes go in
+// come back out of the tokenizer as one argument, in the position they were
+// written into. Quoting that is merely plausible is quoting that names a
+// different key, and a caller building SCAN ... MATCH from a human's typing has
+// no way to notice.
+//
+// The pairing is checked against the tokenizer rather than against an expected
+// piece of text, because the tokenizer is what the argument actually meets: the
+// adapter re-splits the command line it is handed, so a round trip through it
+// is the whole contract.
+func TestQuoteRedisArgumentRoundTripsThroughTheTokenizer(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		argument string
+	}{
+		{"a plain key", "user:1"},
+		{"an empty argument", ""},
+		{"spaces, which would otherwise be two arguments", "hello world"},
+		{"a double quote, which would otherwise close the run", `say "hi"`},
+		{"a backslash, which would otherwise escape its neighbour", `c:\keys\1`},
+		{"a backslash before a quote", `trailing\`},
+		{"a single quote, which needs nothing inside a double-quoted run", "it's"},
+		{"a newline, which the classifier refuses as a second command", "a\nb"},
+		{"a tab", "a\tb"},
+		{"a carriage return", "a\rb"},
+		{"a NUL", "a\x00b"},
+		{"the delete character", "a\x7fb"},
+		{"an x that is not a hex escape", `a\x4`},
+		{"Thai text, whose bytes must arrive as themselves", "ผู้ใช้:๑"},
+		{"the glob metacharacters a MATCH pattern is made of", `user:*?[1-9]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := "SCAN 0 MATCH " + QuoteRedisArgument(test.argument) + " COUNT 10"
+
+			tokens, err := tokenizeRedisCommand(command)
+			if err != nil {
+				t.Fatalf("tokenizeRedisCommand(%q): %v", command, err)
+			}
+			assertTokens(t, command, tokens, []string{"SCAN", "0", "MATCH", test.argument, "COUNT", "10"})
+		})
+	}
+}
+
 func TestRedisDatabaseIndex(t *testing.T) {
 	for _, test := range []struct {
 		name     string

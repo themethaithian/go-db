@@ -123,6 +123,15 @@ func (a *App) ListTables(profileName, database string) service.TableList {
 	return a.svc.ListTables(a.ctx, profileName, database)
 }
 
+// FindKeys returns the keys of a Redis Profile's index whose names match text,
+// searched on the server, for the Explorer's filter box: the tree's own list
+// stops at the first thousand keys, and a key beyond them can only be found by
+// asking Redis. It is Redis's alone — a MySQL schema comes back whole and is
+// filtered where it is shown.
+func (a *App) FindKeys(profileName, database, text string) service.TableList {
+	return a.svc.FindKeys(a.ctx, profileName, database, text)
+}
+
 // ListColumns returns the columns of table in one database of the named
 // Profile, for a table expanded in the DB Explorer's Database tree.
 func (a *App) ListColumns(profileName, database, table string) service.ColumnList {

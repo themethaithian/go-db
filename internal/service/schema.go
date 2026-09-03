@@ -275,7 +275,13 @@ func (s *AppService) ListTables(ctx context.Context, profileName, database strin
 
 	switch target.profile.Engine {
 	case db.EngineRedis:
-		return scanRedisKeys(ctx, target.conn)
+		// The listing walks everything: no pattern, and the two bounds that
+		// keep an expand from pulling a keyspace into a tool window. Which of
+		// them cut the list short is not this level's business — the tree shows
+		// one Truncated flag — so the cut is dropped here and read by FindKeys,
+		// which is answering a question rather than drawing a branch.
+		keys, _ := scanRedisKeys(ctx, target.conn, redisScan{count: scanCount, maxPages: maxScanPages})
+		return keys
 	case db.EngineMongoDB:
 		return listMongoCollections(ctx, target.conn)
 	case db.EngineMySQL:
@@ -404,7 +410,103 @@ func (s *AppService) ListIndexes(ctx context.Context, profileName, database, tab
 	return IndexList{Status: SchemaOK, Message: indexSummary(len(indexes), table), Indexes: indexes}
 }
 
-// The Redis keyspace, and the three numbers that bound reading it.
+// FindKeys returns the keys of the named Redis Profile's index whose names
+// match text, searched on the server rather than filtered here.
+//
+// It exists because the Database tree's filter box cannot answer the question
+// on its own. The tree lists a keyspace with ListTables, which stops at the
+// first thousand keys, and a box that filters that list can only ever narrow
+// the thousand: a key beyond them is invisible to a human who knows its exact
+// name. Redis's own answer is SCAN's MATCH — the server walks the keyspace and
+// returns only what matched — so the thousand becomes a thousand matches
+// instead of a thousand keys, which is the difference between a filter and a
+// search.
+//
+// It is Redis's alone, and off Redis it is refused rather than approximated:
+// a MySQL schema's tables come back whole, so filtering them where they are
+// shown is the honest answer there and there is no server-side search to run.
+//
+// text is read the way a human means it — see redisMatchPattern — and reaches
+// the command line through db.QuoteRedisArgument, never spliced in as-is: the
+// same rule every other read in this file follows, with the same reason behind
+// it. Only the blank test trims: a key may genuinely have a space at either
+// end, so " user" searches for that space.
+//
+// database is ignored, exactly as ListTables ignores it and for the same
+// reason: Redis has one index here and the connection is already on it.
+func (s *AppService) FindKeys(ctx context.Context, profileName, database, text string) TableList {
+	target, status, message := s.schemaTarget(ctx, profileName)
+	if status != SchemaOK {
+		return TableList{Status: status, Message: message}
+	}
+	if target.profile.Engine != db.EngineRedis {
+		return TableList{Status: SchemaFailed, Message: cannotSearchKeys(target.profile.Engine)}
+	}
+	if strings.TrimSpace(text) == "" {
+		return TableList{
+			Status:  SchemaFailed,
+			Message: "There is nothing to search for yet: type some of a key's name, or a pattern like user:*.",
+		}
+	}
+
+	found, cut := scanRedisKeys(ctx, target.conn, redisScan{
+		match: redisMatchPattern(text), count: searchScanCount, maxPages: maxSearchScanPages,
+	})
+	if found.Status != SchemaOK {
+		return found
+	}
+
+	// The keys are the walk's; only the sentence is this method's. A search that
+	// came back short has something to say that a listing does not — which of
+	// the two ways of being short it was.
+	found.Message = searchSummary(len(found.Tables), cut)
+	return found
+}
+
+// redisMatchPattern turns the text a human typed into the glob SCAN's MATCH
+// takes. Two readings, and the text itself decides which applies:
+//
+//   - Text holding a glob character — * ? [ ] — is the pattern, used exactly as
+//     it stands. Someone who typed user:* meant a glob, and wrapping it into
+//     *user:** would answer a question they did not ask. It is also what
+//     RedisInsight does with the same typing, which is where the expectation a
+//     human brings to the box comes from.
+//
+//   - Anything else is a substring: the text wrapped in stars. Typing part of a
+//     name and finding the key is what the filter box did when it filtered a
+//     list on this side, and a search that demanded a leading star would be a
+//     search most people typed wrong.
+//
+// The one escape is the backslash, and only in the substring reading: a
+// backslash is Redis's own escape inside a glob, so an unescaped one would eat
+// the character after it and match something else. The other metacharacters
+// need no escaping here, because text holding any of them took the first
+// branch — it is a pattern, and a pattern's metacharacters are the point of it.
+//
+// Blank text is the caller's to refuse, and FindKeys refuses it: the substring
+// reading would turn it into **, which is every key in the keyspace.
+func redisMatchPattern(text string) string {
+	if strings.ContainsAny(text, "*?[]") {
+		return text
+	}
+	return "*" + strings.ReplaceAll(text, `\`, `\\`) + "*"
+}
+
+// cannotSearchKeys is cannotIntrospect for the question FindKeys asks, and it
+// is a refusal for the same reason: an empty list is a real answer a database
+// can give, so answering one here would say "nothing matched" where the truth
+// is "this is not a thing go-db searches on the server".
+func cannotSearchKeys(engine db.Engine) string {
+	if !engine.Valid() {
+		return fmt.Sprintf("go-db does not know the %q engine this Profile names, so it cannot search it for keys.", engine)
+	}
+	return fmt.Sprintf(
+		"Searching a server for names is Redis's: a %s Profile's tables come back whole, so they are filtered where they are shown.",
+		engineName(engine),
+	)
+}
+
+// The Redis keyspace, and the numbers that bound reading it.
 const (
 	// maxKeys is how many keys the tree will show for one index. It is MaxRows'
 	// argument one shape over — a desktop client renders what a human reads,
@@ -424,10 +526,72 @@ const (
 	// while the cursor crawls. Stopping is better than an expand that never
 	// finishes, and stopping early is reported as a cut like any other.
 	maxScanPages = 32
+
+	// searchScanCount and maxSearchScanPages are the same two numbers for a
+	// search rather than a listing, and both are bigger because MATCH changes
+	// what a page costs. A SCAN with a pattern still reads about COUNT slots per
+	// call, but it returns only the keys that matched — so on the keyspace a
+	// human actually searches, where the match is rare, a page of a thousand
+	// slots comes back nearly empty and the listing's numbers would spend
+	// thirty-two round trips to look at thirty-two thousand slots and find
+	// nothing. Ten thousand slots a call is the shape that fits: one round trip
+	// per ten thousand, and RedisInsight's own default, so a keyspace searched
+	// in both tools takes about the same time in each.
+	//
+	// A hundred of those pages bounds one search at roughly a million slots.
+	// That is the honest trade — long enough to reach a key most people are
+	// looking for, short enough that a search over a keyspace far bigger than
+	// that comes back rather than hanging, and says it did not finish. The
+	// listing's thirty-two would be far too few here, because a search that
+	// stops early has failed at its one job in a way a truncated listing has
+	// not: the key that was wanted may be exactly the one never reached.
+	searchScanCount    = 10000
+	maxSearchScanPages = 100
 )
 
-// scanRedisKeys lists the keys of the index conn is open on, by paging SCAN
-// through ReadQuery until the cursor comes back to 0 or the cap is reached.
+// redisScan is the shape of one walk of the keyspace: the pattern MATCH
+// carries, the COUNT hint each call gets, and how many calls the walk may make.
+//
+// It is a struct rather than three arguments because the two callers differ in
+// all three at once and in nothing else — the listing walks everything in small
+// pages, the search walks for one pattern in large ones — and naming the shape
+// keeps that difference in one place a reader can compare rather than spread
+// across two call sites.
+type redisScan struct {
+	// match is the glob to pass to MATCH, or "" for a walk with no pattern,
+	// which is every key.
+	match string
+	// count is the COUNT hint: roughly how many slots Redis reads per call.
+	count int
+	// maxPages is how many SCAN calls the walk may make before it stops and
+	// says so.
+	maxPages int
+}
+
+// scanCut says how a walk of the keyspace ended, because a list that is not the
+// whole list is not one thing. Being cut at the cap and being cut before the
+// keyspace was seen mean opposite things to a human: the first says there are
+// more of these, narrow it; the second says what you are looking for may still
+// be out there. The listing shows both as one Truncated flag; the search says
+// which, because it is the answer to a question rather than a browse.
+type scanCut int
+
+const (
+	// scanWhole: the cursor came home and every key was seen.
+	scanWhole scanCut = iota
+	// scanCutAtCap: there are more matches than go-db will show.
+	scanCutAtCap
+	// scanCutUnfinished: the walk gave up with keyspace left unseen — the page
+	// bound ran out, or the adapter cut a page of a reply short, which drops
+	// keys nobody will ask for again. Either way the keyspace was not fully
+	// searched, and that is the one thing this answer has to admit.
+	scanCutUnfinished
+)
+
+// scanRedisKeys lists the keys of the index conn is open on that scan asks for,
+// by paging SCAN through ReadQuery until the cursor comes back to 0 or one of
+// the bounds is reached. It returns the list and how the walk ended, so a
+// caller can say which of the two short answers it got.
 //
 // SCAN rather than KEYS, and that is the whole shape of this function. Both are
 // on the classifier's allowlist and both write nothing, but KEYS walks the
@@ -441,23 +605,23 @@ const (
 // Anything that is not a SCAN reply is a failure with a line to read. There is
 // nothing honest to substitute: an empty keyspace is a real answer, so reporting
 // one for a reply nobody could parse would invent it.
-func scanRedisKeys(ctx context.Context, conn db.Conn) TableList {
+func scanRedisKeys(ctx context.Context, conn db.Conn, scan redisScan) (TableList, scanCut) {
 	keys := make([]string, 0, maxKeys)
 	seen := make(map[string]bool, maxKeys)
 	cursor := "0"
-	truncated := false
+	var atCap, unfinished bool
 
 	for page := 0; ; page++ {
-		reply, err := readValue(ctx, conn, "SCAN "+cursor+" COUNT "+strconv.Itoa(scanCount))
+		reply, err := readValue(ctx, conn, scan.command(cursor))
 		if err != nil {
-			return TableList{Status: SchemaFailed, Message: oneLine(err)}
+			return TableList{Status: SchemaFailed, Message: oneLine(err)}, scanWhole
 		}
 
 		next, found, cut, err := readScanPage(reply)
 		if err != nil {
-			return TableList{Status: SchemaFailed, Message: oneLine(err)}
+			return TableList{Status: SchemaFailed, Message: oneLine(err)}, scanWhole
 		}
-		truncated = truncated || cut
+		unfinished = unfinished || cut
 
 		for _, key := range found {
 			if !seen[key] {
@@ -472,13 +636,13 @@ func scanRedisKeys(ctx context.Context, conn db.Conn) TableList {
 			// The cap was reached. Whether there was more is only known when
 			// the cursor came home at the same moment, which is the one case
 			// this is not a cut.
-			truncated = truncated || cursor != "0" || len(keys) > maxKeys
+			atCap = cursor != "0" || len(keys) > maxKeys
 		case cursor == "0":
 			// The keyspace was walked whole.
-		case page+1 < maxScanPages:
+		case page+1 < scan.maxPages:
 			continue
 		default:
-			truncated = true
+			unfinished = true
 		}
 		break
 	}
@@ -488,16 +652,40 @@ func scanRedisKeys(ctx context.Context, conn db.Conn) TableList {
 		keys = keys[:maxKeys]
 	}
 
+	// The cap wins when both are true, and it is the more useful of the two to
+	// say: a walk that filled the list has more to give whether or not it also
+	// ran out of pages, and "there are more" is what the human can act on.
+	cut := scanWhole
+	switch {
+	case atCap:
+		cut = scanCutAtCap
+	case unfinished:
+		cut = scanCutUnfinished
+	}
+
 	tables := make([]TableInfo, 0, len(keys))
 	for _, key := range keys {
 		tables = append(tables, TableInfo{Name: key})
 	}
 	return TableList{
 		Status:    SchemaOK,
-		Message:   listSummary(len(tables), "key", "keys", truncated),
+		Message:   listSummary(len(tables), "key", "keys", cut != scanWhole),
 		Tables:    tables,
-		Truncated: truncated,
+		Truncated: cut != scanWhole,
+	}, cut
+}
+
+// command renders the SCAN this walk sends from cursor. MATCH is left out
+// entirely for a walk with no pattern, so the listing's command line is the
+// one it always was — and the pattern, when there is one, is quoted by the
+// adapter's own quoter rather than pasted in, because it is a human's typing
+// and an unquoted space in it would be a second argument.
+func (scan redisScan) command(cursor string) string {
+	command := "SCAN " + cursor
+	if scan.match != "" {
+		command += " MATCH " + db.QuoteRedisArgument(scan.match)
 	}
+	return command + " COUNT " + strconv.Itoa(scan.count)
 }
 
 // readScanPage reads one SCAN reply: the cursor to ask next, the keys on this
@@ -744,6 +932,28 @@ func listSummary(n int, one, many string, truncated bool) string {
 		return "1 " + one + "."
 	}
 	return fmt.Sprintf("%d %s.", n, many)
+}
+
+// searchSummary is listSummary for FindKeys, in the units a search counts in
+// and with the one distinction a listing never has to draw.
+//
+// The cap case is listSummary's own sentence, because it is the same sentence:
+// there are more of these than are shown. The unfinished case is the one that
+// needed writing — "N keys match" would read as the whole answer, and the whole
+// answer is exactly what a walk that ran out of pages does not have. It says so
+// in the words a human can act on: search again with more of the name.
+func searchSummary(n int, cut scanCut) string {
+	switch cut {
+	case scanCutAtCap:
+		return listSummary(n, "matching key", "matching keys", true)
+	case scanCutUnfinished:
+		return fmt.Sprintf(
+			"%d keys found before the search was stopped; the keyspace was not fully searched.", n)
+	}
+	if n == 1 {
+		return "1 key matches."
+	}
+	return fmt.Sprintf("%d keys match.", n)
 }
 
 func columnSummary(n int, table string) string {

@@ -51,6 +51,7 @@
   import { isPinned, pinnedAmong, togglePin } from "./pins.svelte";
   import { MONGODB, MYSQL, REDIS } from "./browse";
   import { enginesPresent, explorerEngine, switchEngine } from "./explorerEngine.svelte";
+  import { FindKeys } from "../../wailsjs/go/app/App";
   import {
     databaseNode,
     engineLabel,
@@ -99,6 +100,16 @@
   // box's placeholder. No Profile connected yet reads as MySQL's words, the
   // same fallback engineNouns already gives an Engine it does not recognise.
   let activeNouns = $derived(engineNouns(explorerEngine.active ?? MYSQL));
+
+  // The filter box's placeholder: a hint that Redis's filter also reaches the
+  // server (see the Redis search section below) only when Redis is actually
+  // what is on screen, since a MySQL or MongoDB human typing a glob would just
+  // be confused by advice that does not apply to them.
+  let filterPlaceholder = $derived(
+    explorerEngine.active === REDIS
+      ? "Filter keys — or a pattern like user:*"
+      : `Filter ${activeNouns.many}…`,
+  );
 
   let {
     connectedProfiles,
@@ -194,6 +205,158 @@
   let filterInputEl: HTMLInputElement | null = $state(null);
   let treeBodyEl: HTMLDivElement | null = $state(null);
 
+  // --- Redis server-side search -----------------------------------------
+  //
+  // Everything above is a client-side filter over whatever ListTables already
+  // handed the tree — for Redis that is only the first 1000 keys of a
+  // keyspace that can be far larger, so a key past that boundary can never be
+  // found there no matter how exact the pattern typed for it. FindKeys asks
+  // the server the same question RedisInsight's own search does (a SCAN …
+  // MATCH), so while the human is filtering a Redis Profile this component
+  // also runs one of those, and unions its answer into what the tree shows
+  // (see tablesToShow below) rather than replacing the instant client list
+  // with a slower, network-bound one — the loaded keys stay on screen the
+  // moment a character lands, and whatever the server finds joins them
+  // without anything already visible disappearing.
+  //
+  // A search is scoped to a Profile's one database — a Redis Profile never
+  // has more than one (loadDatabases in schema.svelte.ts opens the single
+  // index it connects on) — so state keyed by Profile name alone is enough.
+  // It lives here, next to the filter it serves, for the same reason the
+  // filter itself does: nothing here belongs in schema.svelte.ts's cache, and
+  // nothing here needs to survive a reload.
+  type RedisSearch = {
+    query: string;
+    keys: string[];
+    truncated: boolean;
+    message: string;
+    loading: boolean;
+    error: string | null;
+  };
+
+  // The needle above is lowercased for highlighting; the server's search is
+  // case-sensitive (or a literal glob), so what gets sent to FindKeys keeps
+  // whatever case the human typed, trimmed the same way needle is.
+  let redisQuery = $derived(filterQuery.trim());
+
+  let redisSearches = $state<Record<string, RedisSearch>>({});
+
+  // One counter per Profile, bumped every time a search is kicked off for
+  // it. A response is applied only if it is still the newest one in flight
+  // for that Profile when it lands — comparing query strings would almost
+  // do, but retyping text that was just deleted lands the same query twice,
+  // and the older of those two responses must still lose.
+  const redisSearchTokens: Record<string, number> = {};
+
+  let redisDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Set the instant a keystroke schedules a search, cleared the instant that
+  // search's requests actually go out (250ms later, debounced) — distinct
+  // from each RedisSearch's own `loading`, which only starts once a request
+  // is in flight. Both phases count as "still working on it": see
+  // redisSearchPending below, which the empty-state check and the
+  // in-progress notice both read so neither reads as "nothing found" while a
+  // search has merely not fired yet.
+  let redisPendingQuery: string | null = $state(null);
+
+  async function runRedisSearch(profileName: string, database: string, query: string) {
+    const token = (redisSearchTokens[profileName] ?? 0) + 1;
+    redisSearchTokens[profileName] = token;
+    redisSearches[profileName] = { query, keys: [], truncated: false, message: "", loading: true, error: null };
+    try {
+      const result = await FindKeys(profileName, database, query);
+      if (redisSearchTokens[profileName] !== token) return; // superseded — drop it
+      if (result.status !== "ok") {
+        redisSearches[profileName] = { query, keys: [], truncated: false, message: "", loading: false, error: result.message };
+        return;
+      }
+      redisSearches[profileName] = {
+        query,
+        keys: (result.tables ?? []).map((t) => t.name),
+        truncated: result.truncated ?? false,
+        message: result.message,
+        loading: false,
+        error: null,
+      };
+    } catch (err) {
+      if (redisSearchTokens[profileName] !== token) return;
+      redisSearches[profileName] = { query, keys: [], truncated: false, message: "", loading: false, error: String(err) };
+    }
+  }
+
+  // Whether the current query still has work outstanding for profileName —
+  // queued behind the debounce, or already in flight — so callers can hold
+  // off on "nothing here" until there is actually nothing to say.
+  function redisSearchPending(profileName: string): boolean {
+    if (redisPendingQuery === redisQuery) return true;
+    const entry = redisSearches[profileName];
+    return entry !== undefined && entry.loading && entry.query === redisQuery;
+  }
+
+  // The search entry for profileName if it answers the query on screen right
+  // now — a result still sitting from a query that has since changed is not
+  // this Profile's answer to anything, so callers never see it.
+  function redisSearchFor(profileName: string): RedisSearch | undefined {
+    const entry = redisSearches[profileName];
+    return entry !== undefined && entry.query === redisQuery ? entry : undefined;
+  }
+
+  // A server-only hit rendered the same shape as a loaded key, so tableRow
+  // draws it unchanged and clicking it browses the key exactly like a listed
+  // one does — nothing about a TableNode past its name means anything for a
+  // Redis key, so every other field is the same "not fetched" value a fresh
+  // key node would start with.
+  function serverOnlyTableNode(name: string): TableNode {
+    return {
+      name,
+      rowEstimate: null,
+      expanded: false,
+      loading: false,
+      columns: null,
+      error: null,
+      indexesLoading: false,
+      indexes: null,
+      indexesError: null,
+    };
+  }
+
+  // Debounce and dispatch: reset the 250ms timer on every keystroke, and once
+  // it elapses, search every visible Redis Profile for the query that won.
+  // Also reruns — restarting the debounce — when the set of visible Redis
+  // Profiles itself changes, so a Profile connected mid-filter gets searched
+  // too rather than sitting out the rest of the session. Leaving Redis, or
+  // emptying the box, drops everything: a stale search answering a query
+  // nobody is asking any more is worse than no answer at all.
+  $effect(() => {
+    const engine = explorerEngine.active;
+    const query = redisQuery;
+    const profiles = visibleProfiles;
+    if (engine !== REDIS || query === "") {
+      untrack(() => {
+        if (redisDebounceTimer !== null) {
+          clearTimeout(redisDebounceTimer);
+          redisDebounceTimer = null;
+        }
+        redisPendingQuery = null;
+        if (Object.keys(redisSearches).length > 0) redisSearches = {};
+      });
+      return;
+    }
+    untrack(() => {
+      redisPendingQuery = query;
+      if (redisDebounceTimer !== null) clearTimeout(redisDebounceTimer);
+      redisDebounceTimer = setTimeout(() => {
+        redisDebounceTimer = null;
+        redisPendingQuery = null;
+        for (const profileName of profiles) {
+          const database = (profileNode(profileName).databases ?? [])[0];
+          if (database === undefined) continue;
+          void runRedisSearch(profileName, database, query);
+        }
+      }, 250);
+    });
+  });
+
   // Databases nested under the Profile that owns them, rather than a flat
   // map keyed by some joined string — a Profile name can contain almost
   // anything, so a composite key would need its own escaping to stay
@@ -249,20 +412,39 @@
   // the database's own name is the match (typing "inventory" should reveal
   // the inventory schema whole, not hunt inside it for a table also called
   // that) — otherwise only the tables whose own name hits.
-  function tablesToShow(database: string, tables: TableNode[]): TableNode[] {
+  //
+  // For a Redis Profile this is then unioned with whatever the server search
+  // for the current query has found (redisSearchFor) — a plain string sort
+  // over the combined names, deduplicated, so a key the client filter already
+  // found (case-insensitively) is never listed twice next to the server's
+  // case-sensitive match on the same name. A server hit with no counterpart
+  // in the loaded list becomes a server-only TableNode (serverOnlyTableNode)
+  // so tableRow renders it exactly like any other row, caret-free browse and
+  // all. When the server has nothing yet for this query — no search run, or
+  // none found — the loaded-list result is returned exactly as-is, unsorted,
+  // so nothing already on screen ever reorders out from under a human still
+  // reading it.
+  function tablesToShow(profileName: string, database: string, tables: TableNode[]): TableNode[] {
     if (!filtering) return tables;
-    if (nameMatches(database)) return tables;
-    return tables.filter((t) => nameMatches(t.name));
+    const clientMatches = nameMatches(database) ? tables : tables.filter((t) => nameMatches(t.name));
+    if (engineOf(profileName) !== REDIS) return clientMatches;
+    const search = redisSearchFor(profileName);
+    if (search === undefined || search.keys.length === 0) return clientMatches;
+    const byName = new Map(clientMatches.map((t) => [t.name, t] as const));
+    for (const name of search.keys) {
+      if (!byName.has(name)) byName.set(name, serverOnlyTableNode(name));
+    }
+    return Array.from(byName.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
 
   // Whether a database's row survives the filter at all. A database whose
   // tables have never been fetched stays visible unconditionally — the only
   // way to know it has no match would be to load it, and a filter box is not
   // licence to fetch every schema on the server.
-  function databaseVisible(database: string, node: DatabaseNode): boolean {
+  function databaseVisible(profileName: string, database: string, node: DatabaseNode): boolean {
     if (!filtering) return true;
     if (node.tables === null) return true;
-    return tablesToShow(database, node.tables).length > 0;
+    return tablesToShow(profileName, database, node.tables).length > 0;
   }
 
   // Opens every already-loaded database that has a hit (and the Profile
@@ -280,7 +462,7 @@
           anyDbVisible = true;
           continue;
         }
-        if (databaseVisible(database, dNode)) {
+        if (databaseVisible(profileName, database, dNode)) {
           anyDbVisible = true;
           dNode.expanded = true;
         }
@@ -292,13 +474,18 @@
   // Whether anything at all survives the filter, across every connected
   // Profile — the empty-state line replaces the whole tree exactly when
   // this is false, the same all-or-nothing shape "No profile connected"
-  // already uses above it.
+  // already uses above it. A Redis Profile whose server search for the
+  // current query is still pending counts as "something might still show
+  // up" rather than "nothing does" — without that, the empty state would
+  // flash on for the debounce window and the round trip every single time,
+  // then vanish again the instant a hit lands.
   function anyMatchVisible(): boolean {
     if (!filtering) return true;
     for (const profileName of visibleProfiles) {
+      if (explorerEngine.active === REDIS && redisSearchPending(profileName)) return true;
       const pNode = profileNode(profileName);
       for (const database of pNode.databases ?? []) {
-        if (databaseVisible(database, databaseNode(profileName, database))) return true;
+        if (databaseVisible(profileName, database, databaseNode(profileName, database))) return true;
       }
     }
     return false;
@@ -450,7 +637,7 @@
   {@const nouns = nounsOf(profileName)}
   {@const structured = hasStructure(profileName)}
   {@const system = structured && isSystemDatabase(database)}
-  {@const visibleTables = node.tables !== null ? tablesToShow(database, node.tables) : null}
+  {@const visibleTables = node.tables !== null ? tablesToShow(profileName, database, node.tables) : null}
   <div class="flex items-center border-l-2 border-transparent pr-2 pl-5 hover:bg-surface-raised">
     <button
       type="button"
@@ -563,8 +750,23 @@
 
       <!-- A list the backend cut says so where the list ends, in the same
            voice a truncated result set uses: what is here is not all there
-           is. Only a Redis keyspace reaches the cap today. -->
-      {#if node.truncated}
+           is. Only a Redis keyspace reaches the cap today.
+           While filtering a Redis Profile, this line is the server search's
+           to say instead: its own message when it was itself cut short (it
+           already names which kind of cut), a quiet progress note while the
+           first search for this query is still out, or the failure text if
+           it came back an error. A search that finished clean, within its
+           own limit, says nothing here — there is nothing left to add. -->
+      {#if filtering && engineOf(profileName) === REDIS}
+        {@const search = redisSearchFor(profileName)}
+        {#if search !== undefined && search.error !== null}
+          <p class="py-1 pr-3 pl-12 text-xs text-text-subtle">{search.error}</p>
+        {:else if search !== undefined && search.truncated}
+          <p class="py-1 pr-3 pl-12 text-xs text-text-subtle">{search.message}</p>
+        {:else if redisSearchPending(profileName)}
+          <p class="py-1 pr-3 pl-12 text-xs text-text-subtle">Searching…</p>
+        {/if}
+      {:else if node.truncated}
         <p class="py-1 pr-3 pl-12 text-xs text-text-subtle">
           Showing the first {node.tables?.length ?? 0}
           {nouns.many}; there are more.
@@ -672,7 +874,7 @@
         bind:value={filterQuery}
         onkeydown={handleFilterKeydown}
         class="min-w-0 flex-1 bg-transparent text-base text-text placeholder:text-text-subtle focus:outline-none"
-        placeholder="Filter {activeNouns.many}…"
+        placeholder={filterPlaceholder}
         spellcheck="false"
         autocapitalize="off"
         autocomplete="off"
@@ -791,7 +993,7 @@
             <p class="py-1 pr-3 pl-8 text-sm text-text-subtle">No databases on this server.</p>
           {:else if node.databases !== null}
             {#each node.databases as database (database)}
-              {#if databaseVisible(database, databaseNode(profileName, database))}
+              {#if databaseVisible(profileName, database, databaseNode(profileName, database))}
                 {@render databaseRow(profileName, database)}
               {/if}
             {/each}

@@ -284,6 +284,49 @@ func redisArguments(command string) ([]any, error) {
 
 var errRedisNoCommand = errors.New("db: there is no command to run")
 
+// QuoteRedisArgument renders argument as one argument of a command line — a
+// key, a pattern, a member — quoted so that tokenizeRedisCommand gives back
+// exactly the bytes that went in.
+//
+// It is the tokenizer's inverse, and it is exported because a caller that
+// builds a command out of text it did not write cannot be asked to get the
+// quoting right itself: the service's key search puts a human's typing into
+// SCAN ... MATCH, and text quoted merely plausibly is a pattern that matches
+// something else. The frontend keeps its own copy for the commands it builds
+// (quoteRedisArgument in app/frontend/src/lib/browse.ts); this is the same
+// rules, and the round-trip test beside it is what keeps them the same rules.
+//
+// Double quotes, because that is the run with escapes in it. A quote and a
+// backslash are escaped as themselves, every control byte and 0x7f is written
+// \xNN — which also covers the newline the classifier refuses outright, since a
+// command line holding one is a buffer holding two commands as far as the gate
+// is concerned — and every other byte is passed through unchanged, so a UTF-8
+// name arrives as the bytes it left as.
+//
+// It has no refusal, and that is a difference from the frontend's copy worth
+// naming. The frontend refuses text holding U+FFFD, because a Redis key is
+// arbitrary bytes and bytes that are not valid UTF-8 have already been lost by
+// the time JSON has carried them into that process — a command built from them
+// would name a different key. Here there is nothing to have lost: a Go string
+// is the bytes themselves, and every one of them is written back out.
+func QuoteRedisArgument(argument string) string {
+	const hex = "0123456789abcdef"
+
+	quoted := make([]byte, 0, len(argument)+2)
+	quoted = append(quoted, '"')
+	for i := 0; i < len(argument); i++ {
+		switch c := argument[i]; {
+		case c == '"' || c == '\\':
+			quoted = append(quoted, '\\', c)
+		case c < 0x20 || c == 0x7f:
+			quoted = append(quoted, '\\', 'x', hex[c>>4], hex[c&0x0f])
+		default:
+			quoted = append(quoted, c)
+		}
+	}
+	return string(append(quoted, '"'))
+}
+
 // tokenizeRedisCommand splits one command line into its arguments the way Redis
 // splits an inline command: runs of whitespace separate arguments, a
 // double-quoted run carries escapes, and a single-quoted run carries only an

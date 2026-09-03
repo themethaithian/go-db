@@ -202,6 +202,96 @@ func TestIntegrationListTablesScansARealKeyspace(t *testing.T) {
 	}
 }
 
+// FindKeys against a real server, which is the half the scripted SCAN replies
+// cannot prove: that Redis reads the MATCH argument this package quotes as the
+// pattern it was meant to be, and answers with only the keys that matched.
+//
+// The keyspace is seeded well past the listing's cap on purpose. That is the
+// bug this method exists for — the Explorer's filter box could only ever narrow
+// the first thousand keys, so a key beyond them could not be found however
+// exactly its name was typed — and the assertion below is that the search finds
+// exactly such a key.
+func TestIntegrationFindKeysSearchesARealKeyspace(t *testing.T) {
+	address := requireRedis(t)
+	host, port := splitHostPort(t, address)
+
+	svc := service.New(db.NewProfileStore(t.TempDir(), dbtest.NewFakeKeychain()), guard.NewJSONLAuditLog(t.TempDir()))
+	t.Cleanup(func() {
+		if err := svc.Close(); err != nil {
+			t.Errorf("closing the Connection Registry: %v", err)
+		}
+	})
+
+	profile := db.Profile{
+		Name: "keyspace", Host: host, Port: port, Database: redisIndex, Engine: db.EngineRedis,
+	}
+	if err := svc.SaveProfile(profile, ""); err != nil {
+		t.Fatalf("SaveProfile: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := svc.Connect(ctx, "keyspace"); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	// Seeded through the adapter's write path, for the reason the listing test
+	// gives: what is under test is the read.
+	seed, err := db.NewRedisDriver().Open(ctx, profile, "", nil)
+	if err != nil {
+		t.Fatalf("opening a seeding connection: %v", err)
+	}
+	defer seed.Close() //nolint:errcheck // teardown
+	if _, err := seed.Exec(ctx, "FLUSHDB"); err != nil {
+		t.Fatalf("Exec(FLUSHDB): %v", err)
+	}
+
+	// More than the thousand ListTables will show, so the needle is a key the
+	// tree's own list cannot be relied on to contain.
+	const filler = 1500
+	for i := 0; i < filler; i++ {
+		if _, err := seed.Exec(ctx, fmt.Sprintf("SET filler:%05d v", i)); err != nil {
+			t.Fatalf("Exec(SET): %v", err)
+		}
+	}
+	// A name with a space in it, which is also the argument that would arrive as
+	// two if the quoting were wrong.
+	if _, err := seed.Exec(ctx, `SET "needle key:zzz" v`); err != nil {
+		t.Fatalf("Exec(SET the needle): %v", err)
+	}
+
+	// The substring reading: part of a name, found wherever it is in the key.
+	found := svc.FindKeys(ctx, "keyspace", redisIndex, "eedle key")
+	if found.Status != service.SchemaOK {
+		t.Fatalf("FindKeys status = %q, want %q (message: %s)", found.Status, service.SchemaOK, found.Message)
+	}
+	if len(found.Tables) != 1 || found.Tables[0].Name != "needle key:zzz" {
+		t.Fatalf("keys = %v, want just the needle", tableNames(found.Tables))
+	}
+	if found.Truncated {
+		t.Errorf("Truncated = true on a search that matched one key (message: %s)", found.Message)
+	}
+
+	// The pattern reading: what the human typed, handed to Redis as the glob.
+	globbed := svc.FindKeys(ctx, "keyspace", redisIndex, "filler:0000*")
+	if globbed.Status != service.SchemaOK {
+		t.Fatalf("FindKeys status = %q, want %q (message: %s)", globbed.Status, service.SchemaOK, globbed.Message)
+	}
+	if len(globbed.Tables) != 10 {
+		t.Fatalf("keys = %d, want the ten filler:0000N keys", len(globbed.Tables))
+	}
+
+	// And a search nothing matches is an empty answer rather than a failure:
+	// "no such key" is a real thing to learn.
+	none := svc.FindKeys(ctx, "keyspace", redisIndex, "haystack")
+	if none.Status != service.SchemaOK {
+		t.Fatalf("FindKeys status = %q, want %q (message: %s)", none.Status, service.SchemaOK, none.Message)
+	}
+	if len(none.Tables) != 0 {
+		t.Errorf("keys = %v, want none", tableNames(none.Tables))
+	}
+}
+
 func splitHostPort(t *testing.T, address string) (string, int) {
 	t.Helper()
 
